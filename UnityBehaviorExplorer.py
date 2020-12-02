@@ -57,7 +57,6 @@ def fileIdToLink(ref):
 
         assert len(targetNames) == 1
         targetName = targetNames[0].replace('\\', '/')
-        friendly_name = "/".join(targetName.split("/")[-2:-1])
         link = safe(f"/file/{targetName}")
         return f"<a href='{link}'>{targetName}</a>"
     except (AssertionError, IndexError):
