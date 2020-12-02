@@ -47,10 +47,13 @@ def getReference(obj):
     if isinstance(obj, dict) and 'm_PathID' in obj and 'm_FileName' in obj:
         file_name = str(obj['m_FileName'])
         path_id = str(obj['m_PathID'])
+        if obj['m_PathID'] == 0 and obj['m_FileID'] == 0:
+            return None
         try:
             return archives[file_name][path_id]
         except KeyError as e:
             assert path_id not in archives.get(file_name, {}).keys()
+            # print(type(e), file_name, path_id, e)
             if (file_name.startswith("level") and path_id != "0"):
                 raise
             return obj
