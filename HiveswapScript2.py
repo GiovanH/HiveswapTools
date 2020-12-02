@@ -1,14 +1,38 @@
 import yaml
 import glob
 import os
-from snip import loom
 import asyncio
 import aiofiles
 import pickle
 import json
 import pprint
 import re
-import tqdm
+
+try:
+    from snip.loom import AIOSpool
+except ImportError as e:
+    print(e)
+
+    class AIOSpool:
+        def __init__(self, quota=8, *args):
+            self.queue = []
+
+        def enqueue(self, target):
+            self.queue.append(target)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, type, value, traceback):
+            await asyncio.gather(*self.queue)
+
+try:
+    from tqdm import tqdm
+except ImportError:
+    print("tqdm not installed, using dumb iterator")
+
+    def tqdm(iterable, *args):
+        yield from iterable
 
 game_root = "Act2-AssetStudio/ExportDev2"
 
@@ -16,6 +40,8 @@ CACHED = True
 
 archives = {}
 archives_fallback = {}
+
+# Utilities and loading
 
 def getReference(obj):
     if isinstance(obj, dict) and 'm_PathID' in obj and 'm_FileName' in obj:
@@ -25,7 +51,6 @@ def getReference(obj):
             return archives[file_name][path_id]
         except KeyError as e:
             assert path_id not in archives.get(file_name, {}).keys()
-            print(repr(file_name), repr(path_id), e)
             if (file_name.startswith("level") and path_id != "0"):
                 raise
             return obj
@@ -47,17 +72,17 @@ def resolveRefs(obj, visited=[]):
     return obj
 
 
-def dumpDeep(objs, outpath):
-    dumped_objs = []
-    for obj in tqdm.tqdm(objs, desc=outpath):
-        try:
-            dumped_objs.append(resolveRefs(obj))
-        except:
-            pprint.pprint(obj)
-            raise
+# def dumpDeep(objs, outpath):
+#     dumped_objs = []
+#     for obj in tqdm.tqdm(objs, desc=outpath):
+#         try:
+#             dumped_objs.append(resolveRefs(obj))
+#         except:
+#             pprint.pprint(obj)
+#             raise
 
-    with open(outpath, "w", encoding="utf-8") as fp:
-        yaml.dump(dumped_objs, fp)
+#     with open(outpath, "w", encoding="utf-8") as fp:
+#         yaml.dump(dumped_objs, fp)
 
 
 def iterArchiveFiles():
@@ -74,7 +99,6 @@ async def loadJsonAsset(obj, folder_name, path_id):
         o = json.loads(await fp.read())
         archives[folder_name][path_id] = o
 
-
 async def loadArchives():
     global archives
     archive_cache_path = "archives.pickle"
@@ -89,7 +113,7 @@ async def loadArchives():
             CACHED = False
             return await loadArchives()
     else:
-        async with loom.AIOSpool(20) as spool:
+        async with AIOSpool(20) as spool:
             for folder in glob.glob(os.path.join(game_root, "*") + "/"):
                 folder_name = os.path.split(os.path.split(folder)[0])[1]
                 
@@ -100,6 +124,8 @@ async def loadArchives():
         with open(archive_cache_path, "wb") as fp:
             pickle.dump(archives, fp)
 
+# HS Classes
+
 class HSMonoBehaviour():
     @property
     def keys_simple(self):
@@ -108,6 +134,14 @@ class HSMonoBehaviour():
     @property
     def keys_typed(self):
         return {}
+
+    def _keys_typed(self, keys):
+        try:
+            o = super().keys_typed
+        except AttributeError:
+            o = {}
+        o.update(keys)
+        return o
     
     def __init__(self, obj):
         super().__init__()
@@ -145,12 +179,24 @@ class HSRoot(HSMonoBehaviour):
         return super().keys_simple + ['_folderName', '_pathId']
 
 class HSAsset():
-    def __init__(self, obj):
+    def __init__(self, obj, asset_type="*"):
         self.obj = obj
 
+        archive_name = self.obj['m_FileName']
+        path_id = self.obj['m_PathID']
+
+        matches = glob.glob(os.path.join(game_root, archive_name, asset_type, f"*#{path_id}.*"))
+
+        assert len(matches) == 1, matches
+
+        self.path = matches[0].replace("\\", "/")
+
+    @classmethod
+    def typed(cls, arg):
+        return lambda obj: cls(obj, asset_type=arg)
+
     def toDict(self):
-        # TODO
-        return f"{self.obj['m_FileName']}/{self.obj['m_PathID']}"
+        return self.path
 
 class HSVerb(HSMonoBehaviour):
     def __init__(self, obj):
@@ -160,16 +206,19 @@ class HSVerb(HSMonoBehaviour):
 class HSItem(HSRoot):
     @property
     def keys_simple(self):
-        return super().keys_simple + ['m_Name', '_displayName', 'ItemID', 'm_Script']
+        keys = [
+            'm_Name', '_displayName', 'ItemID', 'm_Script'
+        ]
+        return super().keys_simple + keys
 
     @property
     def keys_typed(self):
-        o = super().keys_typed
-        o.update({
+        return self._keys_typed({
             '_verbs': HSVerb,
-            '_icon': HSAsset
+            '_icon': HSAsset.typed("Sprite")
         })
-        return o
+
+# Operations
 
 def dumpItems():
     All_Items = [HSItem(o) for o in iterArchiveFiles() if 'ItemID' in o]
