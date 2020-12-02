@@ -5,6 +5,7 @@ import json
 from collections import namedtuple
 import re
 import tqdm
+from functools import lru_cache
 
 FileID = namedtuple("FileID", ["fileName", "pathId"])
 
@@ -40,20 +41,27 @@ for path in tqdm.tqdm(file_paths):
         referencedBy[target] = referencedBy.get(target, []) + [source]
 
 
+@lru_cache(10000)
 def getReferencesHtml(file_id):
     if file_id not in referencedBy:
         return '<p>No references to this file</p>'
 
     return "<p>Referenced by:</p>" + "\n".join(["<li>" + fileIdToLink(ref) + "</il>" for ref in referencedBy[file_id]])
 
+@lru_cache(10000)
 def fileIdToLink(ref):
-    target_glob = os.path.join(ref.fileName, "MonoBehaviour", f"*{ref.pathId}.json")
-    targetNames = glob.glob(target_glob)
-    if targetNames:
+    try:
+        assert ref.fileName is not None
+        target_glob = os.path.join(ref.fileName, "*", f"*#{ref.pathId}.*")
+        targetNames = glob.glob(target_glob)
+
+        assert len(targetNames) == 1
         targetName = targetNames[0].replace('\\', '/')
-    friendly_name = targetName.split("/")[-1]
-    link = safe(f"/file/{targetName}")
-    return f"<a href='{link}'>{ref.fileName}/{friendly_name}</a>"
+        friendly_name = "/".join(targetName.split("/")[-2:-1])
+        link = safe(f"/file/{targetName}")
+        return f"<a href='{link}'>{targetName}</a>"
+    except (AssertionError, IndexError):
+        return f"<em>Unknown!</em> ({ref.fileName}/{ref.pathId})"
 
 
 app = Flask(__name__)
@@ -98,3 +106,5 @@ def show(archive, filename):
     traverse(parsed)
     ret = f'<h1>{fileIdToLink(fileId)}</h1>{references}<pre>{json.dumps(parsed, indent=4, sort_keys=False)}</pre>'
     return f'<html><head></head><body>{ret}</body></html>'
+
+app.run()
