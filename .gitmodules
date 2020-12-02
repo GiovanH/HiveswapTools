@@ -1,0 +1,4 @@
+[submodule "AssetStudio"]
+	path = AssetStudio
+	url = https://github.com/GiovanH/AssetStudio
+	branch = UniqueID
