@@ -3,9 +3,11 @@ import glob
 import os
 import json
 from collections import namedtuple
+import collections
 import re
 import tqdm
 from functools import lru_cache
+import pprint
 
 FileID = namedtuple("FileID", ["fileName", "pathId"])
 
@@ -16,18 +18,19 @@ def safe(x):
 file_paths = sorted(glob.glob("*/MonoBehaviour/*"))
 
 referencesTo = {}
-referencedBy = {}
+referencedBy = collections.defaultdict(list)
+referencedAs = collections.defaultdict(lambda: collections.defaultdict(list))
 
-def findRefs(x):
+def findRefs(x, name=None):
     if isinstance(x, dict):
         if 'm_FileName' in x:
             id_ = FileID(x['m_FileName'], x['m_PathID'])
-            yield id_
+            yield (id_, name)
         for k, v in x.items():
-            yield from findRefs(v)
+            yield from findRefs(v, name=k)
     elif isinstance(x, list):
         for v in x:
-            yield from findRefs(v)
+            yield from findRefs(v, name=name)
 
 print("Building references...")
 for path in tqdm.tqdm(file_paths):
@@ -37,16 +40,19 @@ for path in tqdm.tqdm(file_paths):
         parsed = json.load(fp)
 
     # todo make this faster
-    for target in set(findRefs(parsed)):
-        referencedBy[target] = referencedBy.get(target, []) + [source]
-
+    for target, refd_as in findRefs(parsed):
+        referencedBy[target].append(source)
+        referencedAs[target][source].append(refd_as)
 
 @lru_cache(10000)
 def getReferencesHtml(file_id):
     if file_id not in referencedBy:
         return '<p>No references to this file</p>'
 
-    return "<p>Referenced by:</p>" + "\n".join(["<li>" + fileIdToLink(ref) + "</il>" for ref in referencedBy[file_id]])
+    print(file_id)
+    for ref in referencedBy[file_id]:
+        print(ref, referencedAs[file_id][ref])
+    return "<p>Referenced by:</p>" + "\n".join(["<li>" + fileIdToLink(ref) + " as " + ", ".join(referencedAs[file_id][ref]) + "</il>" for ref in set(referencedBy[file_id])])
 
 @lru_cache(10000)
 def fileIdToLink(ref):
