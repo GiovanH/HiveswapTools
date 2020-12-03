@@ -97,6 +97,8 @@ def graphFileRefs(root):
                 key = (root, refd_as, ref)
                 if key in visited or len(visited) > 60:
                     continue
+                if ref.fileName is None:
+                    continue
 
                 visited.append(key)
 
@@ -161,7 +163,7 @@ if __name__ == "__main__":
         {references}
         <pre>{json.dumps(parsed, indent=4, sort_keys=False)}</pre>
         <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
-        <div class='mermaid'>{graphFileRefs(fileId)}</div>'''
+        <div class='mermaid' style="overflow: auto;">{graphFileRefs(fileId)}</div>'''
         return f'<html><head></head><body>{ret}</body></html>'
 
 
