@@ -5,9 +5,16 @@ import json
 from collections import namedtuple
 import collections
 import re
-import tqdm
 from functools import lru_cache
-import pprint
+
+try:
+    raise ImportError
+    from tqdm import tqdm
+except ImportError:
+    print("tqdm not installed, using dumb iterator")
+
+    def tqdm(iterable, *args):
+        yield from iterable
 
 FileID = namedtuple("FileID", ["fileName", "pathId"])
 
@@ -33,7 +40,7 @@ def findRefs(x, name=None):
             yield from findRefs(v, name=name)
 
 print("Building references...")
-for path in tqdm.tqdm(file_paths):
+for path in tqdm(file_paths):
     (folder_name, path_id) = re.match(r"(.*?)\/.*\#(\d+)\.json", path.replace("\\", "/")).groups()
     source = FileID(folder_name, path_id)
     with open(os.path.join(path), 'r', encoding="utf-8") as fp:
