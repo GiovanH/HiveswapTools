@@ -1,4 +1,3 @@
-import yaml
 import glob
 import os
 import asyncio
@@ -45,18 +44,22 @@ archives_fallback = {}
 # Utilities and loading
 
 def getReference(obj):
+    debugging = False
     if isinstance(obj, dict) and 'm_PathID' in obj and 'm_FileName' in obj:
         file_name = str(obj['m_FileName'])
         path_id = str(obj['m_PathID'])
+
+        if path_id == "10186":
+            debugging = True
+
         if obj['m_PathID'] == 0 and obj['m_FileID'] == 0:
             return None
         try:
             return archives[file_name][path_id]
         except KeyError as e:
-            assert path_id not in archives.get(file_name, {}).keys()
-            # print(type(e), file_name, path_id, e)
-            if (file_name.startswith("level") and path_id != "0"):
+            if debugging:
                 raise
+            obj['_KeyError'] = True
             return obj
     else:
         return obj
@@ -93,14 +96,15 @@ def iterArchiveFiles():
     for container, paths in archives.items():
         for p in paths:
             o = paths[p]
-            o['_folderName'] = container
-            o['_pathId'] = p
             yield o
 
 
-async def loadJsonAsset(obj, folder_name, path_id):
+async def loadJsonAsset(obj, folder_name, path_id, utype):
     async with aiofiles.open(obj, "r", encoding="utf-8") as fp:
         o = json.loads(await fp.read())
+        o['_folderName'] = folder_name
+        o['_pathId'] = path_id
+        o['_type'] = utype
         archives[folder_name][path_id] = o
 
 async def loadArchives():
@@ -123,14 +127,26 @@ async def loadArchives():
                 
                 archives[folder_name] = {}
                 for obj in glob.glob(os.path.join(folder, "**", "*.json")):
-                    (path_id,) = re.match(r".*\#(\d+)\.json", obj).groups()
-                    spool.enqueue(loadJsonAsset(obj, folder_name, path_id))
+                    (utype, path_id,) = re.match(r".*\\(.*) \#(\d+)\.json", obj).groups()
+                    spool.enqueue(loadJsonAsset(obj, folder_name, path_id, utype))
         with open(archive_cache_path, "wb") as fp:
             pickle.dump(archives, fp)
 
 # HS Classes
 
 EXAMPLES = {}
+
+SpeakerIdTypes = [
+    "NONE", "JOEY", 
+    "XEFROS", "CHARUN", "ZEBEDE", "MARSTI", "SKYLLA", "DIEMEN", 
+    "KUPRUM", "FOLYKL", "CIRAVA", "POLYPA", "BOLDIR", "AZDAJA", 
+    "KONYYL", "DARAYA", "LANQUE", "LYNERA", "BRONYA", "WANSHI", 
+    "STELSA", "TYZIAS", "REMELE", "ELWURD", "MALLEK", "ARDATA", 
+    "ZEBRUH", "NIHKEE", "AMISIA", "GALEKH", "FOZZER", "CHIXIE", 
+    "IDARAT", "DOCKGAL", "LEGLESS", "VIKARE", "FIAMET", "CRIDEA", 
+    "BARZUM", "BAIZLI", "CHAHUT", "KARAKO", "BARZUM_AND_BAIZLI", 
+    "BYERS", "TRIZZA"
+]
 
 class HSMonoBehaviour():
     DEBUG = False
@@ -158,21 +174,19 @@ class HSMonoBehaviour():
         super().__init__()
         self.obj = obj
         self.dict = {  
-            "__type": self.__class__.__name__
+            "__pyclass": self.__class__.__name__
         }
+
+        all_keys = list(obj.keys())
 
         try:
             k = None
             t = None
 
-            for k in self.keys_simple:
-                if k not in obj:
-                    continue
-                self.dict[k] = getReference(obj[k])
-
             for k, t in self.keys_typed.items():
                 if k not in obj:
                     continue
+                all_keys.remove(k)
 
                 if k == '_verbs' and not recursiveVerbs:
                     self.dict[k] = "[OMMITTED]"
@@ -180,7 +194,7 @@ class HSMonoBehaviour():
 
                 if isinstance(obj[k], list):
                     self.dict[k] = [
-                        t(o) if o is not None else None
+                        t(getReference(o)) if o else o
                         for o in obj[k]
                     ]
                 else:
@@ -191,6 +205,22 @@ class HSMonoBehaviour():
                         self.dict[k] = None
                     else:
                         self.dict[k] = t(ref)
+
+            for k in self.keys_simple:
+                if k not in obj:
+                    continue
+                try:
+                    all_keys.remove(k)
+                except:
+                    print(all_keys)
+                    print(k)
+                self.dict[k] = getReference(obj[k])
+
+            if all_keys:
+                self.dict['__unused'] = {}
+            for k in all_keys:
+                self.dict['__unused'][k] = getReference(obj[k])
+        
         except KeyError:
             print(self, obj)
             raise
@@ -235,7 +265,7 @@ class HSMonoBehaviour():
 class HSRoot(HSMonoBehaviour):
     @property
     def keys_simple(self):
-        return super().keys_simple + ['_folderName', '_pathId']
+        return super().keys_simple + ['_folderName', '_pathId', '_type']
 
 class HSAsset():
     def __init__(self, obj, asset_type="*"):
@@ -316,8 +346,6 @@ class HSCounterTest(HSMonoBehaviour):
         })
 
 class HSHero(HSMonoBehaviour):
-    DEBUG = True
-
     @property
     def keys_simple(self):
         keys = [
@@ -332,8 +360,6 @@ class HSHero(HSMonoBehaviour):
         return super().keys_simple + keys
 
 class HSConvoLines(HSMonoBehaviour):
-    DEBUG = True
-
     @property
     def keys_simple(self):
         keys = [
@@ -349,7 +375,8 @@ class HSConvoLines(HSMonoBehaviour):
             'LoopLineIndex',
             'NextLineIndex',
             'SpeakerId',
-            'TextColorOverride'
+            'TextColorOverride',
+            'LinkMappings'
         ]
         return super().keys_simple + keys
 
@@ -360,6 +387,15 @@ class HSConvoLines(HSMonoBehaviour):
             'OptionConvoId': HSConversationId,
             'Outcome': HSOutcome
         })
+
+    def toTranscript(self):
+        lines = []
+
+        # TODO: Convo formatting
+        line = f"{SpeakerIdTypes[self.get('SpeakerId')]}: {self.get('LineText')}"
+        lines.append(line)
+
+        return lines
 
 class HSConversationId(HSMonoBehaviour):
     DEBUG = True
@@ -377,8 +413,6 @@ class HSConversationId(HSMonoBehaviour):
         return super().keys_simple + keys
 
 class HSConversation(HSMonoBehaviour):
-    DEBUG = True
-
     @property
     def keys_simple(self):
         keys = [
@@ -387,6 +421,7 @@ class HSConversation(HSMonoBehaviour):
             'ConvoCameraSizeOverride',
             'IsPlayerOnly',
             'IsRefresher',
+            'DestroyConversationAfterSceneChange',
             'm_Name'
         ]
         return super().keys_simple + keys
@@ -405,13 +440,11 @@ class HSConversation(HSMonoBehaviour):
         lines = []
 
         for line in self.get("Lines"):
-            lines.append(line)
+            lines += line.toTranscript()
 
         return lines
 
 class HSTarget(HSMonoBehaviour):
-    DEBUG = True
-
     @property
     def keys_simple(self):
         keys = [
@@ -440,7 +473,8 @@ class HSTarget(HSMonoBehaviour):
     def toTranscript(self):
         lines = []
 
-        for message in self.get("ImportedInteractMessage"):
+        for message in self.get("ImportedInteractMessage", []):
+            # Hero targets don't have field
             lines.append(f"Narrator: {message}")
 
         conversation = self.get("ImportedInteractConversation")
@@ -466,13 +500,24 @@ class HSCondition(HSMonoBehaviour):
             '_counterTests': HSCounterTest
         })
 
-class HSOutcome(HSMonoBehaviour):
+# TODO: Map outcomes to subclasses based on
+# _type field
+class HSOutcome(HSRoot):
     DEBUG = True
+
+    @property
+    def keys_simple(self):
+        keys = [
+            'm_Name'
+        ]
+        return super().keys_simple + keys
 
     @property
     def keys_typed(self):
         return self._keys_typed({
-            'Sequence': HSOutcomeSequence
+            'Sequence': HSOutcomeSequence,
+            'ActivateCondition': HSCondition,
+            'ActionsList': HSOutcome
         })
 
     def toTranscript(self):
@@ -518,8 +563,8 @@ class HSVerb(HSMonoBehaviour):
     def keys_typed(self):
         return self._keys_typed({
             '_abilityTargets': HSTarget,
-            '_heroTargets': HSTarget,
             '_itemTargets': HSTarget,
+            '_heroTargets': HSTarget,
             '_interactableTargets': HSTarget,
             '_activationConditions': HSCondition,
             '_defaultTargetFail': HSOutcome,
@@ -536,6 +581,8 @@ class HSVerb(HSMonoBehaviour):
         all_targets = [
             *self.get('_abilityTargets'),
             *self.get('_itemTargets'),
+            *self.get('_heroTargets'),
+            # *self.get('_interactableTargets')
         ]
         for target in all_targets:
             transcript = "\n".join(target.toTranscript())
@@ -569,6 +616,35 @@ class HSVerb(HSMonoBehaviour):
                 lines.append(f"## {verb_clause} with {target_name}\n")
                 lines += target_transcript
                 lines.append("")
+
+        for target in self.get('_heroTargets'):
+            target_name = target.get('Hero').get('m_Name')
+            transcript = target.toTranscript()
+            # Only a couple instances of this (joey tap dance), both null
+
+            if transcript:
+                lines.append(f"## {verb_clause} with {target_name}\n")
+
+                lines += transcript
+                lines.append("")
+
+        # TODO interactable targets
+        for target in self.get('_interactableTargets'):
+            try:
+                target_name = target.get('TargetId').get('m_Name')
+            except:
+                # Target is null
+                assert not target.toTranscript()
+
+            transcript = target.toTranscript()
+            # Only a couple instances of this (joey tap dance), both null
+
+            if transcript:
+                lines.append(f"## {verb_clause} with {target_name}\n")
+
+                lines += transcript
+                lines.append("")
+
 
         outcome = self.get('_outcome')
         if outcome:
@@ -609,6 +685,18 @@ class HSItem(HSRoot):
             '_icon': HSAsset.typed("Sprite")
         })
 
+    def toTranscript(self):
+        name = self.get('_displayName')
+        verbs = self.get('_verbs')
+
+        lines = []
+        lines.append(f"# {name}\n")
+
+        for verb in verbs:
+            lines += verb.toTranscript(parent_name=name)
+
+        return lines
+
 # Operations
 
 def dumpItems():
@@ -616,6 +704,15 @@ def dumpItems():
 
     with open("Items.json", "w", encoding="utf-8") as fp:
         json.dump([i.toDict() for i in All_Items], fp, indent=4)
+
+    with open("ItemsTranscript.md", "w", encoding="utf-8") as fp:
+        for item in All_Items:
+            try:
+                fp.write("\n".join(item.toTranscript()))
+                fp.write("\n")
+            except:
+                pprint.pprint(item.toTranscript())
+                raise
 
 def dumpAbilities():
     All_Abilities = [HSAbility(o, recursiveVerbs=True) for o in iterArchiveFiles() if 'AbilityID' in o]
@@ -635,7 +732,7 @@ def dumpAbilities():
 async def main():
     await loadArchives()
 
-    # dumpItems()
+    dumpItems()
     dumpAbilities()
 
     pprint.pprint(EXAMPLES, compact=True)
