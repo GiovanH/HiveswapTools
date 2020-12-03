@@ -8,7 +8,7 @@ import pprint
 import re
 import collections
 
-try:
+try:    
     from snip.loom import AIOSpool
 except ImportError as e:
     print(e)
@@ -209,11 +209,8 @@ class HSMonoBehaviour():
             for k in self.keys_simple:
                 if k not in obj:
                     continue
-                try:
-                    all_keys.remove(k)
-                except:
-                    print(all_keys)
-                    print(k)
+                all_keys.remove(k)
+
                 self.dict[k] = getReference(obj[k])
 
             if all_keys:
@@ -249,18 +246,16 @@ class HSMonoBehaviour():
                         EXAMPLES[category_name][k] = v
 
     def toDict(self):
-        return {
-            k: (
-                v.toDict() if hasattr(v, 'toDict')
-                else 
-                (
-                    [i.toDict() for i in v if hasattr(i, 'toDict')]
-                    if isinstance(v, list) else v
-                )
-            )
-            for k, v in 
-            self.dict.items()
-        }
+        flat_dict = {}
+        for k, v in self.dict.items():
+            if hasattr(v, 'toDict'):
+                flat_dict[k] = v.toDict()
+            elif isinstance(v, list):
+                flat_dict[k] = [i.toDict() if hasattr(i, 'toDict') else i for i in v]
+            else:
+                flat_dict[k] = v
+
+        return flat_dict
 
 class HSRoot(HSMonoBehaviour):
     @property
@@ -313,8 +308,6 @@ class HSAbility(HSMonoBehaviour):
         return lines
 
 class HSCounter(HSRoot):
-    DEBUG = True
-
     @property
     def keys_simple(self):
         keys = [
@@ -329,8 +322,6 @@ class HSCounter(HSRoot):
         return super().keys_simple + keys
 
 class HSCounterTest(HSMonoBehaviour):
-    DEBUG = True
-
     @property
     def keys_simple(self):
         keys = [
@@ -385,7 +376,7 @@ class HSConvoLines(HSMonoBehaviour):
         return self._keys_typed({
             'Condition': HSCondition,
             'OptionConvoId': HSConversationId,
-            'Outcome': HSOutcome
+            'Outcome': HSOutcome.resolve
         })
 
     def toTranscript(self):
@@ -398,7 +389,6 @@ class HSConvoLines(HSMonoBehaviour):
         return lines
 
 class HSConversationId(HSMonoBehaviour):
-    DEBUG = True
     @property
     def keys_simple(self):
         keys = [
@@ -430,7 +420,7 @@ class HSConversation(HSMonoBehaviour):
     def keys_typed(self):
         return self._keys_typed({
             'ConvoId': HSConversationId,
-            'FinalOutcome': HSOutcome,
+            'FinalOutcome': HSOutcome.resolve,
             'HasBeenPlayedCounter': HSCounter,
             'Lines': HSConvoLines,
             'OrphanedLines': HSConvoLines,
@@ -462,7 +452,7 @@ class HSTarget(HSMonoBehaviour):
     def keys_typed(self):
         return self._keys_typed({
             'Conditions': HSCondition,
-            'Outcome': HSOutcome,
+            'Outcome': HSOutcome.resolve,
             'Ability': HSAbility,
             'Item': HSItem,
             'TargetId': HSTarget,
@@ -475,7 +465,7 @@ class HSTarget(HSMonoBehaviour):
 
         for message in self.get("ImportedInteractMessage", []):
             # Hero targets don't have field
-            lines.append(f"Narrator: {message}")
+            lines.append(f"{message}")
 
         conversation = self.get("ImportedInteractConversation")
         if conversation:
@@ -497,13 +487,49 @@ class HSCondition(HSMonoBehaviour):
     @property
     def keys_typed(self):
         return self._keys_typed({
-            '_counterTests': HSCounterTest
+            '_counterTests': HSCounterTest,
+            '_requiresAllOfTheseItems': HSItem
         })
+
+    def toTranscript(self):
+        lines = []
+
+        if self.get('_requiresAllOfTheseItems'):
+            required_items = [i.get('_displayName') for i in self.get('_requiresAllOfTheseItems')]
+            print(required_items)
+            line = "Player must have items:" + ", ".join(required_items)
+            lines.append(line)
+
+        for test in self.get('_counterTests'):
+            raise NotImplementedError
+
+        return lines
 
 # TODO: Map outcomes to subclasses based on
 # _type field
 class HSOutcome(HSRoot):
     DEBUG = True
+
+    @classmethod
+    def resolve(cls, obj):
+        outcome_class_map = {
+            "OutcomeActionAnimation": HSOutcomeAnimation,
+            "OutcomeActionConversation": HSOutcomeConversation,
+            "OutcomeActionCounters": HSOutcomeCounters,
+            "OutcomeActionCutscene": HSOutcomeCutscene,
+            "OutcomeActionChittr": HSOutcomeChittr,
+            "OutcomeActionInventory": HSOutcomeInventory,
+            "OutcomeActionMovement": HSOutcomeMovement,
+            "OutcomeActionUtility": HSOutcomeUtility,
+            "OutcomeActionMessage": HSOutcomeMessage,
+            "OutcomeActionZoom": HSOutcomeZoom,
+            "OutcomeActionChangeScene": HSOutcomeChangeScene,
+            "OutcomeActionUI": HSOutcomeUI
+        }
+
+        obj_type = obj.get("_type")
+        cls_match = outcome_class_map.get(obj_type, cls)
+        return cls_match(obj)
 
     @property
     def keys_simple(self):
@@ -517,18 +543,33 @@ class HSOutcome(HSRoot):
         return self._keys_typed({
             'Sequence': HSOutcomeSequence,
             'ActivateCondition': HSCondition,
-            'ActionsList': HSOutcome
+            'ActionsList': HSOutcome.resolve
         })
 
     def toTranscript(self):
-        if self.get('Sequence'):
-            return self.get('Sequence').toTranscript()
-        else:
-            return []
+        # Children cannot use this function
+        if self.__class__ != HSOutcome:
+            raise NotImplementedError(self.__class__)
+
+        if 'Sequence' in self.dict:
+            # OutcomeSequence wrapper
+            if self.get('Sequence'):
+                return self.get('Sequence').toTranscript()
+            else:
+                return []
+        
+        assert self.get("ActionsList"), self.dict
+        # Actual outcome sequence
+        lines = []
+        if self.get("ActivateCondition"):
+            lines += self.get("ActivateCondition").toTranscript()
+
+        for outcome in self.get("ActionsList"):
+            lines += outcome.toTranscript()
+
+        return []
 
 class HSOutcomeSequence(HSMonoBehaviour):
-    DEBUG = True
-
     @property
     def keys_simple(self):
         keys = [
@@ -539,7 +580,7 @@ class HSOutcomeSequence(HSMonoBehaviour):
     @property
     def keys_typed(self):
         return self._keys_typed({
-            'nodes': HSOutcome
+            'nodes': HSOutcome.resolve
         })
 
     def toTranscript(self):
@@ -548,6 +589,56 @@ class HSOutcomeSequence(HSMonoBehaviour):
             lines += node.toTranscript()
 
         return lines
+
+class HSOutcomeChangeScene(HSOutcome):
+    DEBUG = True
+
+class HSOutcomeZoom(HSOutcome):
+    DEBUG = True
+
+class HSOutcomeMessage(HSOutcome):
+    DEBUG = True
+
+    @property
+    def keys_simple(self):
+        keys = [
+            'Messages'
+        ]
+        return super().keys_simple + keys
+
+    def toTranscript(self):
+        lines = []
+        for message in self.get("Messages"):
+            lines.append(f"{message}")
+        return lines
+
+class HSOutcomeAnimation(HSOutcome):
+    DEBUG = True
+
+class HSOutcomeMovement(HSOutcome):
+    DEBUG = True
+
+class HSOutcomeUtility(HSOutcome):
+    DEBUG = True
+
+class HSOutcomeConversation(HSOutcome):
+    DEBUG = True
+
+class HSOutcomeCounters(HSOutcome):
+    DEBUG = True
+
+class HSOutcomeCutscene(HSOutcome):
+    DEBUG = True
+
+class HSOutcomeChittr(HSOutcome):
+    DEBUG = True
+
+class HSOutcomeInventory(HSOutcome):
+    DEBUG = True
+    
+class HSOutcomeUI(HSOutcome):
+    DEBUG = True
+
 
 class HSVerb(HSMonoBehaviour):
     @property
@@ -567,8 +658,8 @@ class HSVerb(HSMonoBehaviour):
             '_heroTargets': HSTarget,
             '_interactableTargets': HSTarget,
             '_activationConditions': HSCondition,
-            '_defaultTargetFail': HSOutcome,
-            '_outcome': HSOutcome,
+            '_defaultTargetFail': HSOutcome.resolve,
+            '_outcome': HSOutcome.resolve,
         })
 
     def toTranscript(self, parent_name=None):
@@ -732,10 +823,11 @@ def dumpAbilities():
 async def main():
     await loadArchives()
 
-    dumpItems()
-    dumpAbilities()
-
-    pprint.pprint(EXAMPLES, compact=True)
+    try:
+        dumpItems()
+        dumpAbilities()
+    finally:
+        pprint.pprint(EXAMPLES, compact=True)
 
     # Abilities = [o for o in iterArchiveFiles() if 'AbilityID' in o]
     # dumpDeep(Abilities, "Abilities.yaml")
