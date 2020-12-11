@@ -132,6 +132,11 @@ async def loadArchives():
         with open(archive_cache_path, "wb") as fp:
             pickle.dump(archives, fp)
 
+def block(gen):
+    for i in gen:
+        yield f"  {i}"
+    yield ""
+
 # HS Classes
 
 EXAMPLES = {}
@@ -425,6 +430,9 @@ class HSConversation(HSMonoBehaviour):
     def toTranscript(self):
         lines = []
 
+        # LOCALIZABLE
+        yield "convo " + self.get("ConvoId").get("IdString")
+
         for line in self.get("Lines"):
             yield from line.toTranscript()
 
@@ -467,7 +475,6 @@ class HSTarget(HSMonoBehaviour):
             yield from conversation.toTranscript()
 
 class HSCondition(HSMonoBehaviour):
-    DEBUG = True
     # TODO: There are definitely more fields than this
 
     ComparisonOp = [
@@ -494,33 +501,42 @@ class HSCondition(HSMonoBehaviour):
         })
 
     def toTranscript(self):
-        if self.get('_requiresAllOfTheseItems'):
-            required_items = [i.get('_displayName') for i in self.get('_requiresAllOfTheseItems')]
-            print(required_items)
+        lines = []
+
+        if _requiresAllOfTheseItems := self.get('_requiresAllOfTheseItems'):
+            requirements = [repr(i.get('_displayName')) for i in _requiresAllOfTheseItems]
+            
             # LOCALIZABLE
-            line = "Player must have items:" + ", ".join(required_items)
-            yield line
+            lines.append("Player must have items: " + ", ".join(requirements))
+
+        if MustHaveTargetedObjs := self.get('MustHaveTargetedObjs'):
+            requirements = [repr(i.get('m_Name')) for i in MustHaveTargetedObjs]
+            
+            # LOCALIZABLE
+            lines.append("If targeting object(s) " + ", ".join(requirements))
 
         for test in self.get('_counterTests'):
             comparison = test.get('_comparison')
             value = test.get('_value')
 
             try:
-                counter_name = self.get('counter').get('m_Name')
+                counter_name = test.get('_counter').get('m_Name')
             except AttributeError:
                 # Counter can be null
                 counter_name = "None"
 
             comparison_str = f"{self.ComparisonOp[comparison]}"
             # LOCALIZABLE
-            yield f"(If counter '{counter_name}' {comparison_str} {value})"
+            lines.append(f"(If counter '{counter_name}' {comparison_str} {value})")
 
+        if not lines:
+            lines.append("Always(???)")
+
+        yield from lines
 
 # TODO: Map outcomes to subclasses based on
 # _type field
 class HSOutcome(HSRoot):
-    DEBUG = True
-
     @classmethod
     def resolve(cls, obj):
         outcome_class_map = {
@@ -535,10 +551,14 @@ class HSOutcome(HSRoot):
             "OutcomeActionMessage": HSOutcomeMessage,
             "OutcomeActionZoom": HSOutcomeZoom,
             "OutcomeActionChangeScene": HSOutcomeChangeScene,
+            "OutcomeActionChangeHero": HSOutcomeChangeHero,
             "OutcomeActionUI": HSOutcomeUI,
             "OutcomeActionSound": HSOutcomeSound,
             "OutcomeOnStateEnter": HSOutcomeOnStateEnter,
             "OutcomeSwitchCameraTarget": HSOutcomeSwitchCameraTarget,
+            "OutcomeActionVFX": HSOutcomeVFX,
+            "OutcomeActionFade": HSOutcomeFade,
+            "OutcomeActionNPCGoal": HSOutcomeNPCGoal
         }
 
         obj_type = obj.get("_type")
@@ -555,15 +575,23 @@ class HSOutcome(HSRoot):
     @property
     def keys_typed(self):
         return self._keys_typed({
-            'Sequence': HSOutcomeSequence,
+            'Sequence': HSOutcomeCanvas,
             'ActivateCondition': HSCondition,
             'ActionsList': HSOutcome.resolve
         })
+
+    def __str__(self):
+        return f"({self.__class__.__name__}) {self.get('m_Name')} @{self.get('_folderName')}#{self.get('_pathId')}"
 
     def toTranscript(self):
         # Children cannot use this function
         if self.__class__ != HSOutcome:
             raise NotImplementedError(self.__class__)
+
+        if self.get('_type') != "Outcome":
+            raise NotImplementedError(self.get('_type'))
+
+        yield str(self)
 
         if 'Sequence' in self.dict:
             # OutcomeSequence wrapper
@@ -573,17 +601,108 @@ class HSOutcome(HSRoot):
             assert "ActionsList" in self.obj, [self.dict, self.get("_type")]
             
             # Actual outcome sequence
-            # TODO: If condition, wrap stuff in a block
-            if self.get("ActivateCondition"):
-                yield from self.get("ActivateCondition").toTranscript()
+            condition = list(self.get("ActivateCondition").toTranscript())
+            if condition:
+                yield from condition
 
-            for outcome in self.get("ActionsList"):
-                yield from outcome.toTranscript()
+                # TODO: Ordering?
+                for outcome in self.get("ActionsList"):
+                    yield from block(outcome.toTranscript())
 
+            else:
+                for outcome in self.get("ActionsList"):
+                    yield from outcome.toTranscript()
 
-class HSOutcomeOnStateEnter(HSRoot):
+class HSOutcomeVFX(HSOutcome):
+    LineVFXTypes = [
+        "None",
+        "Flash",
+        "HoldIt",
+        "TakeThat",
+        "Objection",
+        "Flash_Minor",
+        "Long_Flash"
+    ]
+
+    @property
+    def keys_simple(self):
+        keys = [
+            'LineVFXToTrigger',
+            'VFXName',
+            'VFXStartDelay',
+        ]
+        return super().keys_simple + keys
+
+    def toTranscript(self):
+        # Localizable
+        yield f"VFX {self.LineVFXTypes[self.get('LineVFXToTrigger')]} ({self.get('VFXName')})"
+
+class HSOutcomeNPCGoal(HSMonoBehaviour):
+    @property
+    def keys_simple(self):
+        keys = [
+            'm_Name',
+        ]
+        return super().keys_simple + keys
+
+    @property
+    def keys_typed(self):
+        return self._keys_typed({
+            'Sequence': HSOutcomeCanvas,
+            'NPCStateUpdates': HSNPCState
+        })
+
+    def toTranscript(self):
+        for update in self.get("NPCStateUpdates"):
+            # Localizable
+            yield from update.toTranscript()
+
+class HSNPCState(HSMonoBehaviour):
     DEBUG = True
 
+    @property
+    def keys_simple(self):
+        keys = [
+            'Scene',
+            'StartPosObject',
+            'UseScenePosition',
+            'Position'
+        ]
+        return super().keys_simple + keys
+
+    @property
+    def keys_typed(self):
+        return self._keys_typed({
+            'Id': HSTarget,
+        })
+
+    def toTranscript(self):
+        # LOCALIZABLE
+        name = self.get("Id").get("m_Name")
+        startpos = self.get("startpos")
+        yield f"(Move {name} from {startpos})"
+
+class HSOutcomeFade(HSMonoBehaviour):
+    FadeType = [
+        "FadeIn",
+        "FadeOut",
+        "WakeUp"
+    ]
+
+    @property
+    def keys_simple(self):
+        keys = [
+            'FadeDuration',
+            'TypeOfFade',
+        ]
+        return super().keys_simple + keys
+
+    def toTranscript(self):
+        # Localizable
+        ftype = self.get("TypeOfFade")
+        yield f"Fade {self.FadeType[ftype]} {self.get('FadeDuration')}s"
+
+class HSOutcomeOnStateEnter(HSRoot):
     @property
     def keys_typed(self):
         return self._keys_typed({
@@ -596,14 +715,22 @@ class HSOutcomeOnStateEnter(HSRoot):
         yield ""
 
 class HSOutcomeSwitchCameraTarget(HSMonoBehaviour):
-    DEBUG = True
-    # TODO
+    # there's a bunch of other camera stuff we can ignore
+
+    @property
+    def keys_simple(self):
+        keys = [
+            'CameraPanTarget',
+            'AttachToHero',
+            'SnapToHero',
+        ]
+        return super().keys_simple + keys
 
     def toTranscript(self):
         # LOCALIZABLE
-        yield "(Move camera)"
+        yield f"(Move camera to {self.get('CameraPanTarget')})"
 
-class HSOutcomeSequence(HSMonoBehaviour):
+class HSOutcomeCanvas(HSRoot):
     @property
     def keys_simple(self):
         keys = [
@@ -618,15 +745,18 @@ class HSOutcomeSequence(HSMonoBehaviour):
         })
 
     def toTranscript(self):
-        lines = []
-        for node in self.get('nodes'):
+        # LOCALIZABLE
+        h = f"{self.get('_folderName')} OutcomeCanvas#{self.get('_pathId')}"
+        yield f"# {h}"
+
+        if self.get('nodes') is None:
+            print(self.toDict())
+        # TODO: Order?
+        for node in self.get('nodes')[::-1]:
             yield from node.toTranscript()
 
-        return lines
 
 class HSOutcomeChangeScene(HSOutcome):
-    DEBUG = True
-
     @property
     def keys_simple(self):
         keys = [
@@ -638,12 +768,53 @@ class HSOutcomeChangeScene(HSOutcome):
         ]
         return super().keys_simple + keys
 
+    def toTranscript(self):
+        verb = "Fade" if self.get('Fade') else "Cut"
+        # LOCALIZABLE
+        yield f"({verb} to scene '{self.get('GoToScene')}')"
+
+class HSOutcomeChangeHero(HSOutcome):
+    @property
+    def keys_simple(self):
+        keys = [
+            'AddHeroFacing',
+            'AddHeroSpawnLocation',
+            'AddHeroToParty',
+            'ClearFloorMarkerOverride',
+            'DisableHero',
+            'DisableSwitching',
+            'EnableSwitching',
+            'FrontFloorMarkerOverride',
+            'RearFloorMarkerOverride',
+            'RemoveHeroFromParty',
+            'SwitchHero',
+            'UnlockHero',
+            'GoToScene'
+        ]
+        return super().keys_simple + keys
+
+    def toTranscript(self):
+        # LOCALIZABLE
+        # TODO
+        yield
+
 class HSOutcomeZoom(HSOutcome):
-    DEBUG = True
+    @property
+    def keys_simple(self):
+        keys = [
+            'EndActiveZoom',
+            'PopupZoom',
+            'ZoomTargetName',
+        ]
+        return super().keys_simple + keys
+
+    @property
+    def keys_typed(self):
+        return self._keys_typed({
+            'ZoomTarget': HSTarget
+        })
 
 class HSOutcomeMovement(HSOutcome):
-    DEBUG = True
-
     @property
     def keys_simple(self):
         keys = [
@@ -669,8 +840,6 @@ class HSOutcomeMovement(HSOutcome):
             yield from action.toTranscript()
 
 class HSMovementAction(HSMonoBehaviour):
-    DEBUG = True
-
     @property
     def keys_simple(self):
         keys = [
@@ -698,8 +867,6 @@ class HSMovementAction(HSMonoBehaviour):
         yield f"Move {object} to {destination}{instant}"
 
 class HSOutcomeSound(HSOutcome):
-    DEBUG = True
-
     @property
     def keys_simple(self):
         keys = [
@@ -727,12 +894,12 @@ class HSOutcomeSound(HSOutcome):
             yield f"(play audio '{play_file.toDict()}')"
 
 class HSOutcomeMessage(HSOutcome):
-    DEBUG = True
-
     @property
     def keys_simple(self):
         keys = [
-            'Messages'
+            'Messages',
+            'interactionData',
+            'loadFromVerb'
         ]
         return super().keys_simple + keys
 
@@ -761,10 +928,88 @@ class HSOutcomeAnimation(HSOutcome):
             yield f"Animation: {obj_name} {param_name}, {anim_type=} {value=}"
 
 class HSOutcomeUtility(HSOutcome):
-    DEBUG = True
+    @property
+    def keys_simple(self):
+        keys = [
+            'ConditionalConversations',
+            'EndActiveConversation',
+            'LineVFXToPlay',
+            'TriggerPartyConversation',
+            'ClearCheckpointSave',
+            'CreateCheckpointSave',
+            'DoFinalSave',
+            'EnableNewGamePlusTitle',
+            'EventOutcome',
+            'ForceAutosave',
+            'LoadCheckpointSave',
+            'ResumeAutosaveTimer',
+            'StopAutosaveTimer',
+            'UnlockAchievement',
+            'UpdateHeroDataPosition',
+        ]
+        return super().keys_simple + keys
+
+    @property
+    def keys_typed(self):
+        return self._keys_typed({
+            'ConversationToTrigger': HSConversation
+        })
+
+    def toTranscript(self):
+        assert not self.get("ConditionalConversations")
+
+        if self.get("EndActiveConversation"):
+            # LOCALIZABLE
+            yield "(End conversation)"
+
+        if self.get("DoFinalSave"):
+            # LOCALIZABLE
+            yield "(Save game FINAL)"
+
+        if self.get("ForceAutosave"):
+            # LOCALIZABLE
+            yield "(Autosave)"
+
+        if ach := self.get("UnlockAchievement"):
+            # LOCALIZABLE
+            yield f"(Unlock Achievement: '{ach}')"
+
+        assert not self.get("LineVFXToPlay")
+        assert not self.get('TriggerPartyConversation')
+        assert not self.get('ClearCheckpointSave')
+        assert not self.get('CreateCheckpointSave')
+        assert not self.get('EnableNewGamePlusTitle')
+        assert not self.get('LoadCheckpointSave')
+        assert not self.get('ResumeAutosaveTimer')
+        assert not self.get('StopAutosaveTimer')
+        assert not self.get('UpdateHeroDataPosition')
+
+        assert self.get('EventOutcome') == {
+            "m_PersistentCalls": {
+                "m_Calls": []
+            }
+        }
 
 class HSOutcomeConversation(HSOutcome):
-    DEBUG = True
+    @property
+    def keys_simple(self):
+        keys = [
+            'ConditionalConversations',
+            'EndActiveConversation',
+            'LineVFXToPlay',
+            'TriggerPartyConversation'
+        ]
+        return super().keys_simple + keys
+
+    @property
+    def keys_typed(self):
+        return self._keys_typed({
+            'ConversationToTrigger': HSConversation
+        })
+
+    def toTranscript(self):
+        assert not self.get("ConditionalConversations")
+        yield from self.get("ConversationToTrigger").toTranscript()
 
 class HSCounterChange(HSOutcome):
     @property
@@ -782,15 +1027,16 @@ class HSCounterChange(HSOutcome):
         })
 
     def toTranscript(self):
-        change_types = [
-            "Increment",
-            "Decrement"
-            "HitMin",
-            "HitMax",
-            "Changed",
-            "Equals",
-            "Any"
-        ]
+        # TODO this is probably mix and match
+        change_types = {
+            0b0000001: "Increment",
+            0b0000010: "Decrement",
+            0b0000100: "HitMin",
+            0b0001000: "HitMax",
+            0b0010000: "Changed",
+            0b0100000: "Equals",
+            0b1000000: "Any"
+        }
 
         try:
             counter_name = self.get('counter').get('m_Name')
@@ -818,7 +1064,20 @@ class HSOutcomeCounter(HSOutcome):
         return lines
 
 class HSOutcomeCutscene(HSOutcome):
-    DEBUG = True
+    @property
+    def keys_simple(self):
+        keys = [
+            'ClipToPlay',
+            'CoverScreenWhileLoading',
+            'NewPauseOnLastFrameSetting',
+            'OverridePauseOnLastFrame',
+            'OverrideStopMusicFlag'
+        ]
+        return super().keys_simple + keys
+
+    def toTranscript(self):
+        # LOCALIZABLE
+        yield f"(play cutscene '{self.get('ClipToPlay')}')"
 
 class HSOutcomeChittr(HSOutcome):
     DEBUG = True
@@ -849,12 +1108,58 @@ class HSOutcomeChittr(HSOutcome):
 
 
 class HSOutcomeInventory(HSOutcome):
-    DEBUG = True
+    @property
+    def keys_simple(self):
+        keys = [
+            'AbilitiesToAdd',
+            'AbilitiesToRemove',
+            'DevicesToAdd',
+            'DevicesToRemove',
+            'HeroTarget',
+            'TrialItemsToUnlock',
+        ]
+        return super().keys_simple + keys
     
+    @property
+    def keys_typed(self):
+        return self._keys_typed({
+            'ItemsToAdd': HSItem,
+            'ItemsToRemove': HSItem
+        })
+
+    def toTranscript(self):
+        for ability in self.get("AbilitiesToRemove"):
+            ability_name = ability.get("_displayName")
+            # LOCALIZABLE
+            yield f"Skill '{ability_name}' removed"
+
+        for ability in self.get("AbilitiesToAdd"):
+            ability_name = ability.get("_displayName")
+            # LOCALIZABLE
+            yield f"Skill '{ability_name}' learned"
+
+        for device in self.get("DevicesToRemove"):
+            device_name = device.get("_displayName")
+            # LOCALIZABLE
+            yield f"'{device_name}' removed from inventory"
+
+        for device in self.get("DevicesToAdd"):
+            device_name = device.get("_displayName")
+            # LOCALIZABLE
+            yield f"'{device_name}' added to inventory"
+
+        for item in self.get("ItemsToRemove"):
+            item_name = item.get("_displayName")
+            # LOCALIZABLE
+            yield f"'{item_name}' removed from inventory"
+
+        for item in self.get("ItemsToAdd"):
+            item_name = item.get("_displayName")
+            # LOCALIZABLE
+            yield f"'{item_name}' added to inventory"
+
 
 class HSHeaderMessage(HSMonoBehaviour):
-    DEBUG = True
-
     HeaderAnimType = [
         "AboveHead_FadeOut",
         "AboveHead_Alt_FadeOut",
@@ -906,6 +1211,11 @@ class HSHeaderMessage(HSMonoBehaviour):
                 return str.upper()
             return str
 
+        sfx = self.get('sfxToPlay')
+        if sfx:
+            # LOCALIZABLE
+            yield f"(play audio '{sfx.toDict()}')"
+
         # LOCALIZABLE
         for linekey in ['DisplayText', 'DisplayTextLine2', 'DisplayTextLine3']:
             v = self.get(linekey)
@@ -914,8 +1224,6 @@ class HSHeaderMessage(HSMonoBehaviour):
         
 
 class HSOutcomeUI(HSOutcome):
-    DEBUG = True
-
     @property
     def keys_simple(self):
         keys = [
@@ -931,7 +1239,7 @@ class HSOutcomeUI(HSOutcome):
     @property
     def keys_typed(self):
         return self._keys_typed({
-            'HeaderMessages': HSHeaderMessage,
+            'HeaderMessages': HSHeaderMessage
         })
 
     def toTranscript(self, parent_name=None):
@@ -1131,7 +1439,7 @@ def dumpAbilities():
                 raise
 
 def dumpOutcomes():
-    All_Outcomes = [HSOutcome.resolve(o) for o in iterArchiveFiles() if o.get("_type") == "OutcomeOnStateEnter"]
+    All_Outcomes = [HSOutcomeCanvas(o) for o in iterArchiveFiles() if o.get("_type") == "OutcomeCanvas"]
 
     with open("Outcomes.json", "w", encoding="utf-8") as fp:
         json.dump([i.toDict() for i in All_Outcomes], fp, indent=4)
