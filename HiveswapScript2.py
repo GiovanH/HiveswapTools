@@ -182,7 +182,17 @@ class HSMonoBehaviour():
             "__pyclass": self.__class__.__name__
         }
 
-        all_keys = list(obj.keys())
+        all_keys = set(obj.keys())
+        known_keys = set(self.keys_typed.keys()).union(self.keys_simple)
+
+        # If there are expect keys this object doesn't have
+        if not (all_keys >= known_keys):
+            print(obj.get("_type"), "does not map to", self.__class__.__name__)
+            print("Expected", known_keys)
+            print("Actual", all_keys)
+            print("Missing field", known_keys.difference(all_keys))
+            print()
+            raise AssertionError(obj)
 
         try:
             k = None
@@ -223,13 +233,17 @@ class HSMonoBehaviour():
             for k in all_keys:
                 self.dict['__unused'][k] = getReference(obj[k])
         
-        except KeyError:
-            print(self, obj)
+        except (KeyError, AssertionError) as e:
+            print(e.__class__.__name__, e)
+            print(self, k, t)
+            pprint.pprint(obj)
+            print()
             raise
         except ValueError as e:
-            print(e)
+            print(type(e), e)
             print(self, k, t)
             print(list(obj.keys()))
+            print()
             raise
 
         if self.DEBUG:
@@ -246,7 +260,7 @@ class HSMonoBehaviour():
                     EXAMPLES[category_name] = {}
 
                 old_example = EXAMPLES[category_name].get(k, [])
-                if old_example in [[], None, False]:
+                if old_example in [[], None, False] or (isinstance(old_example, dict) and old_example.get("_KeyError")):
                     if isinstance(v, list) and len(v) > 0:
                         EXAMPLES[category_name][k] = [v[0], ...]
                     else:
@@ -368,7 +382,7 @@ class HSConvoLines(HSMonoBehaviour):
             'IsPlayerOption',
             'LineText',
             'LineVFX',
-            'LineMappings',
+            # 'LineMappings',
             'LoopLineIndex',
             'NextLineIndex',
             'SpeakerId',
@@ -442,11 +456,11 @@ class HSTarget(HSMonoBehaviour):
     @property
     def keys_simple(self):
         keys = [
-            'CursorHighlightHotspot',
-            'CursorHighlightOverride',
-            'MustApproachOverride',
-            'ImportedAnimOneShot',
-            'ImportedInteractMessage',
+            # 'CursorHighlightHotspot',
+            # 'CursorHighlightOverride',
+            # 'MustApproachOverride',
+            # 'ImportedAnimOneShot',
+            # 'ImportedInteractMessage',
             'm_Script',
             'm_Name'
         ]
@@ -455,24 +469,24 @@ class HSTarget(HSMonoBehaviour):
     @property
     def keys_typed(self):
         return self._keys_typed({
-            'Conditions': HSCondition,
-            'Outcome': HSOutcome.resolve,
-            'Ability': HSAbility,
-            'Item': HSItem,
-            'TargetId': HSTarget,
-            'Hero': HSHero,
-            'ImportedInteractConversation': HSConversation
+            # 'Conditions': HSCondition,
+            # 'Outcome': HSOutcome.resolve,
+            # 'Ability': HSAbility,
+            # 'Item': HSItem,
+            # 'TargetId': HSTarget,
+            # 'Hero': HSHero,
+            # 'ImportedInteractConversation': HSConversation
         })
 
-    def toTranscript(self):
-        for message in self.get("ImportedInteractMessage", []):
-            # Hero targets don't have field
-            # LOCALIZABLE
-            yield f"{message}"
+    # def toTranscript(self):
+    #     for message in self.get("ImportedInteractMessage", []):
+    #         # Hero targets don't have field
+    #         # LOCALIZABLE
+    #         yield f"{message}"
 
-        conversation = self.get("ImportedInteractConversation")
-        if conversation:
-            yield from conversation.toTranscript()
+    #     conversation = self.get("ImportedInteractConversation")
+    #     if conversation:
+    #         yield from conversation.toTranscript()
 
 class HSCondition(HSMonoBehaviour):
     # TODO: There are definitely more fields than this
@@ -534,8 +548,6 @@ class HSCondition(HSMonoBehaviour):
 
         yield from lines
 
-# TODO: Map outcomes to subclasses based on
-# _type field
 class HSOutcome(HSRoot):
     @classmethod
     def resolve(cls, obj):
@@ -558,11 +570,18 @@ class HSOutcome(HSRoot):
             "OutcomeSwitchCameraTarget": HSOutcomeSwitchCameraTarget,
             "OutcomeActionVFX": HSOutcomeVFX,
             "OutcomeActionFade": HSOutcomeFade,
-            "OutcomeActionNPCGoal": HSOutcomeNPCGoal
+            "OutcomeActionNPCGoal": HSOutcomeNPCGoal,
+            "OutcomeActionTrial": HSOutcomeTrial,
+            "OutcomeActionPolynav": HSOutcomePolynav,
+            "Outcome": HSOutcomeSequence
         }
 
         obj_type = obj.get("_type")
-        cls_match = outcome_class_map.get(obj_type, cls)
+        if obj_type is None and 'Sequence' in obj:
+            # Coherse, debug?
+            return HSOutcomeWrapper(obj)
+
+        cls_match = outcome_class_map[obj_type]
         return cls_match(obj)
 
     @property
@@ -571,14 +590,6 @@ class HSOutcome(HSRoot):
             'm_Name'
         ]
         return super().keys_simple + keys
-
-    @property
-    def keys_typed(self):
-        return self._keys_typed({
-            'Sequence': HSOutcomeCanvas,
-            'ActivateCondition': HSCondition,
-            'ActionsList': HSOutcome.resolve
-        })
 
     def __str__(self):
         return f"({self.__class__.__name__}) {self.get('m_Name')} @{self.get('_folderName')}#{self.get('_pathId')}"
@@ -593,27 +604,87 @@ class HSOutcome(HSRoot):
 
         yield str(self)
 
-        if 'Sequence' in self.dict:
-            # OutcomeSequence wrapper
-            if self.get('Sequence'):
-                yield from self.get('Sequence').toTranscript()
+class HSOutcomeWrapper(HSMonoBehaviour):
+    @property
+    def keys_typed(self):
+        return self._keys_typed({
+            'Sequence': HSOutcomeCanvas
+        })
+
+class HSOutcomeSequence(HSMonoBehaviour):
+    # DEBUG = True
+
+    @property
+    def keys_simple(self):
+        keys = [
+            'StartDelay'
+        ]
+        return super().keys_simple + keys
+
+    @property
+    def keys_typed(self):
+        return self._keys_typed({
+            'ActivateCondition': HSCondition,
+            'ActionsList': HSOutcome.resolve
+        })
+
+    def toTranscript(self):
+        # Actual outcome sequence
+        condition = list(self.get("ActivateCondition").toTranscript())
+        if condition:
+            yield from condition
+
+            # TODO: Ordering?
+            for outcome in self.get("ActionsList"):
+                yield from block(outcome.toTranscript())
+
         else:
-            assert "ActionsList" in self.obj, [self.dict, self.get("_type")]
-            
-            # Actual outcome sequence
-            condition = list(self.get("ActivateCondition").toTranscript())
-            if condition:
-                yield from condition
+            for outcome in self.get("ActionsList"):
+                yield from outcome.toTranscript()
 
-                # TODO: Ordering?
-                for outcome in self.get("ActionsList"):
-                    yield from block(outcome.toTranscript())
 
-            else:
-                for outcome in self.get("ActionsList"):
-                    yield from outcome.toTranscript()
+class HSOutcomePolynav(HSMonoBehaviour):
+    DEBUG = True
 
-class HSOutcomeVFX(HSOutcome):
+class HSOutcomeTrial(HSMonoBehaviour):
+    DEBUG = True
+
+    @property
+    def keys_typed(self):
+        return self._keys_typed({
+            'CenteredConvoImageToShow': HSEvidence,
+            'ConvoImageToShow': HSEvidence,
+            'Testimony': HSTestimony
+        })
+
+class HSEvidence(HSMonoBehaviour):
+    DEBUG = True
+
+class HSTestimony(HSMonoBehaviour):
+    @property
+    def keys_simple(self):
+        keys = [
+            'm_Name',
+            'IncorrectEvidenceTries',
+            'ShowMenuButtonDuringLoop'
+        ]
+        return super().keys_simple + keys
+
+    @property
+    def keys_typed(self):
+        return self._keys_typed({
+            'GameOverOutcome': HSOutcome.resolve,
+            'IncorrectEvidenceDefaultOutcome': HSOutcome.resolve,
+            'LoopConversation': HSConversation,
+            'Statements': HSTestimonyStatement,
+            'TestimonyActiveCounter': HSCounter,
+            'TestimonyFirstPassCounter': HSCounter
+        })
+
+class HSTestimonyStatement(HSMonoBehaviour):
+    DEBUG = True
+
+class HSOutcomeVFX(HSMonoBehaviour):
     LineVFXTypes = [
         "None",
         "Flash",
@@ -648,7 +719,7 @@ class HSOutcomeNPCGoal(HSMonoBehaviour):
     @property
     def keys_typed(self):
         return self._keys_typed({
-            'Sequence': HSOutcomeCanvas,
+            'Sequence': HSNPCMovement,
             'NPCStateUpdates': HSNPCState
         })
 
@@ -657,9 +728,24 @@ class HSOutcomeNPCGoal(HSMonoBehaviour):
             # Localizable
             yield from update.toTranscript()
 
-class HSNPCState(HSMonoBehaviour):
+class HSNPCMovement(HSMonoBehaviour):
     DEBUG = True
 
+    @property
+    def keys_simple(self):
+        keys = [
+            'Entries',
+            'm_Name'
+        ]
+        return super().keys_simple + keys
+
+    @property
+    def keys_typed(self):
+        return self._keys_typed({
+            'NPCTarget': HSNPC
+        })
+
+class HSNPCState(HSMonoBehaviour):
     @property
     def keys_simple(self):
         keys = [
@@ -673,7 +759,7 @@ class HSNPCState(HSMonoBehaviour):
     @property
     def keys_typed(self):
         return self._keys_typed({
-            'Id': HSTarget,
+            'Id': HSNPC,
         })
 
     def toTranscript(self):
@@ -681,6 +767,14 @@ class HSNPCState(HSMonoBehaviour):
         name = self.get("Id").get("m_Name")
         startpos = self.get("startpos")
         yield f"(Move {name} from {startpos})"
+
+class HSNPC(HSMonoBehaviour):
+    @property
+    def keys_simple(self):
+        keys = [
+            'm_Name',
+        ]
+        return super().keys_simple + keys
 
 class HSOutcomeFade(HSMonoBehaviour):
     FadeType = [
@@ -741,7 +835,7 @@ class HSOutcomeCanvas(HSRoot):
     @property
     def keys_typed(self):
         return self._keys_typed({
-            'nodes': HSOutcome.resolve
+            'nodes': HSOutcomeSequence
         })
 
     def toTranscript(self):
@@ -751,12 +845,13 @@ class HSOutcomeCanvas(HSRoot):
 
         if self.get('nodes') is None:
             print(self.toDict())
+            raise AssertionError
         # TODO: Order?
         for node in self.get('nodes')[::-1]:
             yield from node.toTranscript()
 
 
-class HSOutcomeChangeScene(HSOutcome):
+class HSOutcomeChangeScene(HSMonoBehaviour):
     @property
     def keys_simple(self):
         keys = [
@@ -773,7 +868,7 @@ class HSOutcomeChangeScene(HSOutcome):
         # LOCALIZABLE
         yield f"({verb} to scene '{self.get('GoToScene')}')"
 
-class HSOutcomeChangeHero(HSOutcome):
+class HSOutcomeChangeHero(HSMonoBehaviour):
     @property
     def keys_simple(self):
         keys = [
@@ -798,7 +893,7 @@ class HSOutcomeChangeHero(HSOutcome):
         # TODO
         yield
 
-class HSOutcomeZoom(HSOutcome):
+class HSOutcomeZoom(HSMonoBehaviour):
     @property
     def keys_simple(self):
         keys = [
@@ -811,10 +906,18 @@ class HSOutcomeZoom(HSOutcome):
     @property
     def keys_typed(self):
         return self._keys_typed({
-            'ZoomTarget': HSTarget
+            'ZoomTarget': HSZoomTarget
         })
 
-class HSOutcomeMovement(HSOutcome):
+class HSZoomTarget(HSMonoBehaviour):
+    @property
+    def keys_typed(self):
+        return self._keys_typed({
+            'OnZoomInOutcome': HSOutcome.resolve,
+            'OnZoomOutOutcome': HSOutcome.resolve
+        })
+
+class HSOutcomeMovement(HSMonoBehaviour):
     @property
     def keys_simple(self):
         keys = [
@@ -855,8 +958,8 @@ class HSMovementAction(HSMonoBehaviour):
     @property
     def keys_typed(self):
         return self._keys_typed({
-            'TargetNPC': HSTarget,
-            '_heroWalkToPosition': HSTarget
+            'TargetNPC': HSNPC,
+            # '_heroWalkToPosition': HSTarget  # Always null or keyerror?
         })
 
     def toTranscript(self):
@@ -866,7 +969,7 @@ class HSMovementAction(HSMonoBehaviour):
         # LOCALIZABLE
         yield f"Move {object} to {destination}{instant}"
 
-class HSOutcomeSound(HSOutcome):
+class HSOutcomeSound(HSMonoBehaviour):
     @property
     def keys_simple(self):
         keys = [
@@ -893,7 +996,7 @@ class HSOutcomeSound(HSOutcome):
             # LOCALIZABLE
             yield f"(play audio '{play_file.toDict()}')"
 
-class HSOutcomeMessage(HSOutcome):
+class HSOutcomeMessage(HSMonoBehaviour):
     @property
     def keys_simple(self):
         keys = [
@@ -908,7 +1011,7 @@ class HSOutcomeMessage(HSOutcome):
             # LOCALIZABLE
             yield f"{message}"
 
-class HSOutcomeAnimation(HSOutcome):
+class HSOutcomeAnimation(HSMonoBehaviour):
     @property
     def keys_simple(self):
         keys = [
@@ -927,14 +1030,14 @@ class HSOutcomeAnimation(HSOutcome):
             # LOCALIZABLE
             yield f"Animation: {obj_name} {param_name}, {anim_type=} {value=}"
 
-class HSOutcomeUtility(HSOutcome):
+class HSOutcomeUtility(HSMonoBehaviour):
     @property
     def keys_simple(self):
         keys = [
-            'ConditionalConversations',
-            'EndActiveConversation',
-            'LineVFXToPlay',
-            'TriggerPartyConversation',
+            # 'ConditionalConversations',
+            # 'EndActiveConversation',
+            # 'LineVFXToPlay',
+            # 'TriggerPartyConversation',
             'ClearCheckpointSave',
             'CreateCheckpointSave',
             'DoFinalSave',
@@ -949,18 +1052,7 @@ class HSOutcomeUtility(HSOutcome):
         ]
         return super().keys_simple + keys
 
-    @property
-    def keys_typed(self):
-        return self._keys_typed({
-            'ConversationToTrigger': HSConversation
-        })
-
     def toTranscript(self):
-        assert not self.get("ConditionalConversations")
-
-        if self.get("EndActiveConversation"):
-            # LOCALIZABLE
-            yield "(End conversation)"
 
         if self.get("DoFinalSave"):
             # LOCALIZABLE
@@ -976,13 +1068,13 @@ class HSOutcomeUtility(HSOutcome):
 
         assert not self.get("LineVFXToPlay")
         assert not self.get('TriggerPartyConversation')
-        assert not self.get('ClearCheckpointSave')
-        assert not self.get('CreateCheckpointSave')
-        assert not self.get('EnableNewGamePlusTitle')
-        assert not self.get('LoadCheckpointSave')
-        assert not self.get('ResumeAutosaveTimer')
-        assert not self.get('StopAutosaveTimer')
-        assert not self.get('UpdateHeroDataPosition')
+        # assert not self.get('ClearCheckpointSave')
+        # assert not self.get('CreateCheckpointSave')
+        # assert not self.get('EnableNewGamePlusTitle')
+        # assert not self.get('LoadCheckpointSave')
+        # assert not self.get('ResumeAutosaveTimer')
+        # assert not self.get('StopAutosaveTimer')
+        # assert not self.get('UpdateHeroDataPosition')
 
         assert self.get('EventOutcome') == {
             "m_PersistentCalls": {
@@ -990,7 +1082,7 @@ class HSOutcomeUtility(HSOutcome):
             }
         }
 
-class HSOutcomeConversation(HSOutcome):
+class HSOutcomeConversation(HSMonoBehaviour):
     @property
     def keys_simple(self):
         keys = [
@@ -1009,9 +1101,15 @@ class HSOutcomeConversation(HSOutcome):
 
     def toTranscript(self):
         assert not self.get("ConditionalConversations")
+        
+        assert not self.get("ConditionalConversations")
+
+        if self.get("EndActiveConversation"):
+            # LOCALIZABLE
+            yield "(End conversation)"
         yield from self.get("ConversationToTrigger").toTranscript()
 
-class HSCounterChange(HSOutcome):
+class HSCounterChange(HSMonoBehaviour):
     @property
     def keys_simple(self):
         keys = [
@@ -1050,7 +1148,7 @@ class HSCounterChange(HSOutcome):
         # LOCALIZABLE
         return [f"{change_types[change_type]} counter '{counter_name}' by {value}"]
 
-class HSOutcomeCounter(HSOutcome):
+class HSOutcomeCounter(HSMonoBehaviour):
     @property
     def keys_typed(self):
         return self._keys_typed({
@@ -1063,7 +1161,7 @@ class HSOutcomeCounter(HSOutcome):
             yield from change.toTranscript()
         return lines
 
-class HSOutcomeCutscene(HSOutcome):
+class HSOutcomeCutscene(HSMonoBehaviour):
     @property
     def keys_simple(self):
         keys = [
@@ -1079,17 +1177,23 @@ class HSOutcomeCutscene(HSOutcome):
         # LOCALIZABLE
         yield f"(play cutscene '{self.get('ClipToPlay')}')"
 
-class HSOutcomeChittr(HSOutcome):
-    DEBUG = True
-
+class HSOutcomeChittr(HSMonoBehaviour):
     @property
     def keys_simple(self):
         keys = [
             'HideChittr',
             'ShowChittr',
-            'SetActiveProfile'
+            'SetActiveProfile',
+            'ShowAllTextImmediately',
+            'UpdateChittrHistory'
         ]
         return super().keys_simple + keys
+
+    @property
+    def keys_typed(self):
+        return self._keys_typed({
+            'ChittrConversation': HSConversation
+        })
 
     def toTranscript(self, parent_name=None):
         if self.get('ShowChittr'):
@@ -1107,7 +1211,7 @@ class HSOutcomeChittr(HSOutcome):
             yield "(Hides Chittr)"
 
 
-class HSOutcomeInventory(HSOutcome):
+class HSOutcomeInventory(HSMonoBehaviour):
     @property
     def keys_simple(self):
         keys = [
@@ -1223,7 +1327,7 @@ class HSHeaderMessage(HSMonoBehaviour):
                 yield _transform(v)
         
 
-class HSOutcomeUI(HSOutcome):
+class HSOutcomeUI(HSMonoBehaviour):
     @property
     def keys_simple(self):
         keys = [
