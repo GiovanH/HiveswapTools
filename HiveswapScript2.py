@@ -7,6 +7,7 @@ import json
 import pprint
 import re
 import collections
+from urllib.parse import quote_plus, quote
 
 try:    
     from snip.loom import AIOSpool
@@ -42,6 +43,7 @@ archives = {}
 archives_fallback = {}
 
 visited = []
+outcomes_seen = set()
 
 # Utilities and loading
 
@@ -139,10 +141,11 @@ async def loadArchives():
         with open(archive_cache_path, "wb") as fp:
             pickle.dump(archives, fp)
 
-def block(gen):
+def block(gen, kind="block"):
+    yield f"<div class='{kind}'>"
     for i in gen:
-        yield f"  {i}"
-    yield ""
+        yield f"    {i}"
+    yield "</div>"
 
 # HS Classes
 
@@ -164,6 +167,12 @@ BloodTypeTextColor = [
     "None", "JOEY", "JUDE", "BURGUNDY", "BRONZE", "YELLOW", 
     "OLIVE", "LIME", "RUST", "GOLD", "GREY", "JADE", "TEAL", 
     "BLUE", "INDIGO", "PURPLE", "VIOLET", "FUCHSIA"
+]
+
+HeroNum = [
+    "Joey",
+    "Jude",
+    "Xefros"
 ]
 
 class HSMonoBehaviour():
@@ -301,13 +310,19 @@ class HSMonoBehaviour():
         visited.clear()
         return self.toDict()
 
-    def toTranscript(self):
+    def toTranscriptBody(self):
         yield "TODO " + str(self)
 
 class HSRoot(HSMonoBehaviour):
     @property
     def keys_simple(self):
         return super().keys_simple + ['_folderName', '_pathId', '_type']
+
+    @property
+    def key(self):
+        assert self.get('_folderName')
+        return (self.get('_folderName'), self.get('_pathId'))
+    
 
 # class HSLazy(dict):
 #     def __init__(self, t, obj):
@@ -362,11 +377,15 @@ class HSItem(HSRoot):
     def title(self):
         return self.get('_displayName')
     
-    def toTranscript(self):
+    def toTranscriptBody(self):
         name = self.title
 
+        if icon := self.get("_icon"):
+            # LOCALIZABLE
+            yield f"<img class='item_icon' src='{quote(icon.toDict())}' title='{icon.toDict()}'></img>"
+
         for verb in self.get('_verbs'):
-            yield from verb.toTranscript(parent_name=name)
+            yield from verb.toTranscriptBody(parent_name=name)
 
 class HSAbility(HSMonoBehaviour):
     @property
@@ -387,11 +406,15 @@ class HSAbility(HSMonoBehaviour):
     def title(self):
         return self.get('_displayName')
     
-    def toTranscript(self):
+    def toTranscriptBody(self):
         name = self.title
 
+        if icon := self.get("_icon"):
+            # LOCALIZABLE
+            yield f"<img class='item_icon' src='{quote(icon.toDict())}' title='{icon.toDict()}'></img>"
+
         for verb in self.get('_verbs'):
-            yield from verb.toTranscript(parent_name=name)
+            yield from verb.toTranscriptBody(parent_name=name)
 
 
 class HSHero(HSMonoBehaviour):
@@ -466,24 +489,22 @@ class HSConvoLines(HSMonoBehaviour):
             'Outcome': HSOutcome.resolve
         })
 
-    def toTranscript(self, line_num=1):
-        # TODO: lots
-        if self.get("IsPlayerOption"):
-            # LOCALIZABLE
-            yield ""
-            yield "(CHOICE:)"
+class HSConversationSpeaker(HSMonoBehaviour):
+    @property
+    def keys_simple(self):
+        keys = [
+            'SpeakerId',
+            'SpeakerColor',
+            'TextColor',
+            'AlternativeSpaceCharacter'
+        ]
+        return super().keys_simple + keys
 
-        # LOCALIZABLE
-        yield f"{line_num} | {SpeakerIdTypes[self.get('SpeakerId')]}: {self.get('LineText')}"
-
-        if links := self.get("LinkMappings"):
-            for link in links:
-                # LOCALIZABLE
-                yield f"{link.get('LinkIndex')}: {link.get('MessageText')}"
-
-        if (next_line := self.get("NextLineIndex")) != -1:
-            # Localizable
-            yield f"(Jump to line #{next_line})"
+    @property
+    def keys_typed(self):
+        return self._keys_typed({
+            'NameLearnedCounter': HSCounter
+        })
 
 class HSConversationId(HSMonoBehaviour):
     @property
@@ -523,18 +544,62 @@ class HSConversation(HSMonoBehaviour):
             'OrphanedLines': HSConvoLines,
         })
 
-    def toTranscript(self):
-        lines = []
+    def toTranscriptBody(self):
+        convo_lines = []
 
-        # LOCALIZABLE
-        yield "convo " + self.get("ConvoId").get("IdString")
+        has_jump = any(
+            line.get("NextLineIndex") != -1
+            for line in self.get("Lines")
+        )
 
-        # TODO: Simplify if there aren't any jumps?
-        # Maybe put transcript logic here?
-        for i, line in enumerate(self.get("Lines")):
-            yield from line.toTranscript(i + 1)
+        # Start item
+        yield f"<div class='convo' id='{self.get('ConvoId').get('IdString')}'>"
 
-        return lines
+        if has_jump:
+            yield "<ol>"
+
+        for line_num, line in enumerate(self.get("Lines")):
+            # TODO: lots
+            try:
+                speaker = ConversationSpeakers[line.get('SpeakerId')]
+                color_id = line.get("TextColorOverride") or speaker.get("SpeakerColor")
+                
+                color = BloodTypeTextColor[color_id]
+            except KeyError:
+                color = f"BLOOD{line.get('SpeakerId')}"
+
+            tag_name = "li" if has_jump and not line.get("IsPlayerOption") else "p"
+            yield f"<{tag_name} class='{color}'>"
+
+            if line.get("IsPlayerOption"):
+                # LOCALIZABLE
+                yield ""
+                yield "(CHOICE)"
+
+            # LOCALIZABLE
+            yield f"<span class='speakername'>{SpeakerIdTypes[line.get('SpeakerId')]}</span> {line.get('LineText')}"
+
+            # Link mappings for galekh
+            if links := line.get("LinkMappings"):
+                for link in links:
+                    # LOCALIZABLE
+                    yield f"<span class='footnote'>{link.get('LinkIndex')}: {link.get('MessageText')}</span>"
+
+            # "Jump" notifier
+            if (next_line := line.get("NextLineIndex")) != -1:
+                # Localizable
+                yield f"<span class='jump'>(Jump to line #{next_line-1})</span>"
+            
+            # End item
+            yield f"</{tag_name}>"
+        yield from convo_lines  # block(convo_lines)
+
+        if has_jump:
+            yield "</ol>"
+        yield "</div>"
+
+        if final_outcome := self.get("FinalOutcome"):
+            yield from final_outcome.toTranscriptBody()
 
 class HSTarget(HSMonoBehaviour):
     @property
@@ -571,20 +636,24 @@ class HSCondition(HSMonoBehaviour):
             'MustNotHaveTargetedObjs': HSTarget
         })
 
-    def toTranscript(self):
+    def toTranscriptBody(self):
         lines = []
+
+        if (required_hero := self.get('MustBeHero')) != -1:
+            # LOCALIZABLE
+            lines.append("current hero is " + HeroNum[required_hero])
 
         if _requiresAllOfTheseItems := self.get('_requiresAllOfTheseItems'):
             requirements = [repr(i.get('_displayName')) for i in _requiresAllOfTheseItems]
             
             # LOCALIZABLE
-            lines.append("Player must have items: " + ", ".join(requirements))
+            lines.append("player has items: " + ", ".join(requirements))
 
         if MustHaveTargetedObjs := self.get('MustHaveTargetedObjs'):
             requirements = [repr(i.get('m_Name')) for i in MustHaveTargetedObjs]
             
             # LOCALIZABLE
-            lines.append("If targeting object(s) " + ", ".join(requirements))
+            lines.append("targeting object(s) " + ", ".join(requirements))
 
         for test in self.get('_counterTests'):
             comparison = test.get('_comparison')
@@ -598,12 +667,14 @@ class HSCondition(HSMonoBehaviour):
 
             comparison_str = f"{self.ComparisonOp[comparison]}"
             # LOCALIZABLE
-            lines.append(f"(If counter '{counter_name}' {comparison_str} {value})")
+            lines.append(f"counter '{counter_name}' {comparison_str} {value}")
 
-        if not lines:
-            lines.append("Always(???)")
-
-        yield from lines
+        # LOCALIZABLE
+        if lines:
+            yield "<span class='condition'>If " + " AND ".join(lines) + "</span>"
+        else:
+            yield f"<!-- {pprint.pformat(self.toDict())} -->"
+            yield "<span class='condition always'>Always</span>"
 
 class HSPresentOutcome(HSMonoBehaviour):
     @property
@@ -619,14 +690,14 @@ class HSPresentOutcome(HSMonoBehaviour):
             'TrialStateCounter': HSCounter,
         })
 
-    def toTranscript(self):
+    def toTranscriptBody(self):
         yield "Present outcome:"
         if counter := self.get("TrialStateCounter"):
             yield counter.get('m_Name')
 
         outcome = HSOutcome.resolve(self.get("Outcome"))
         if outcome:
-            yield from outcome.toTranscript()
+            yield from outcome.toTranscriptBody()
         yield ""
 
 class HSEvidence(HSMonoBehaviour):
@@ -655,34 +726,38 @@ class HSEvidence(HSMonoBehaviour):
             'DescriptionCounter': HSCounter
         })
 
-    def toTranscript(self):
+    def toTranscriptBody(self):
         if icon := self.get("IconSprite"):
             # LOCALIZABLE
-            yield icon.toDict()
+            yield f"<img class='evidence_icon' src='{quote(icon.toDict())}' title='{icon.toDict()}'></img>"
 
         descriptions = self.get("Descriptions")
         dcounter = self.get("DescriptionCounter")
         if dcounter:
             # LOCALIZABLE
-            yield dcounter.get("m_Name")
+            yield "<span class='evidence_counter_switch'>" + dcounter.get("m_Name") + "</span>"
 
+        yield "<p class='evidence_descriptions'>"
         if len(descriptions) > 1:
+            yield "<ol class='evidence_descriptions'>"
             for i, d in enumerate(descriptions):
                 # LOCALIZABLE
-                yield f"{i+1}. {d}"
+                yield f"<li>{d}</li>"
+            yield "</ol>"
         else:
             for d in descriptions:
                 # LOCALIZABLE
                 yield d
+        yield "</p>"
 
         # for poutcome in self.get("PresentOutcomes"):
-        #     yield from poutcome.toTranscript()
+        #     yield from poutcome.toTranscriptBody()
 
         if outcome := self.get("DefaultPresentOutcome"):
             if outcome.get("Sequence"):
                 yield "When presented on other:"
                 yield str(outcome.toDict())
-                yield from outcome.toTranscript()
+                yield from outcome.toTranscriptBody()
 
 class HSTestimony(HSMonoBehaviour):
     @property
@@ -764,7 +839,7 @@ class HSNPCState(HSMonoBehaviour):
             'Id': HSNPC,
         })
 
-    def toTranscript(self):
+    def toTranscriptBody(self):
         # LOCALIZABLE
         name = self.get("Id").get("m_Name")
         startpos = self.get("startpos")
@@ -806,7 +881,7 @@ class HSMovementAction(HSMonoBehaviour):
             # '_heroWalkToPosition': HSTarget  # Always null or keyerror?
         })
 
-    def toTranscript(self):
+    def toTranscriptBody(self):
         instant = " (teleport)" if self.get("_teleportMove") else ""
         destination = self.get('_targetDestination')
         object = self.get('_object')
@@ -828,7 +903,7 @@ class HSCounterChange(HSMonoBehaviour):
             'counter': HSCounter
         })
 
-    def toTranscript(self):
+    def toTranscriptBody(self):
         # TODO this is probably mix and match
         change_types = {
             0b0000001: "Increment",
@@ -839,6 +914,7 @@ class HSCounterChange(HSMonoBehaviour):
             0b0100000: "Equals",
             0b1000000: "Any"
         }
+        # TODO if it's Increment, Decrement, value is always 0? ignored?
 
         try:
             counter_name = self.get('counter').get('m_Name')
@@ -850,7 +926,7 @@ class HSCounterChange(HSMonoBehaviour):
         value = self.get('Value')
 
         # LOCALIZABLE
-        return [f"{change_types[change_type]} counter '{counter_name}' by {value}"]
+        yield f"<span class='sys'>{change_types[change_type]} counter '{counter_name}' by {value}</span>"
 
 
 class HSHeaderMessage(HSMonoBehaviour):
@@ -898,7 +974,7 @@ class HSHeaderMessage(HSMonoBehaviour):
             'colorData': HSAsset
         })
 
-    def toTranscript(self, parent_name=None):
+    def toTranscriptBody(self, parent_name=None):
         # TODO
         def _transform(str):
             if self.get('forceAllCaps'):
@@ -912,10 +988,39 @@ class HSHeaderMessage(HSMonoBehaviour):
 
         # LOCALIZABLE
         for linekey in ['DisplayText', 'DisplayTextLine2', 'DisplayTextLine3']:
-            v = self.get(linekey)
+            v = "<span class='headermessage'>" + self.get(linekey) + "</span>"
             if v:
                 yield _transform(v)
         
+class HSInteractable(HSMonoBehaviour):
+    DEBUG = True
+
+    @property
+    def keys_simple(self):
+        keys = [
+            '_displayName',
+
+        ]
+        return super().keys_simple + keys
+
+    @property
+    def keys_typed(self):
+        return self._keys_typed({
+            '_activeCondition': HSCondition,
+            '_targetId': HSTarget,
+            '_verbs': HSVerb
+        })
+
+    @property
+    def title(self):
+        if target := self.get("_targetId"):
+            return target.get("m_Name", "UNNAMED TARGET") 
+        return self.get("m_Name", "UNNAMED NO TARGET")
+
+    def toTranscriptBody(self):
+        for v in self.get("_verbs"):
+            yield from v.toTranscriptBody(parent_name=self.title)
+
 class HSHeroTarget(HSMonoBehaviour):
     DEBUG = True
 
@@ -927,9 +1032,9 @@ class HSHeroTarget(HSMonoBehaviour):
             'Hero': HSHero
         })
 
-    def toTranscript(self):
+    def toTranscriptBody(self):
         if outcome := self.get("Outcome"):
-            yield from outcome.toTranscript()
+            yield from outcome.toTranscriptBody()
 
 class HSImportTarget(HSMonoBehaviour):
     # "Import Targets" from things like verbs
@@ -957,7 +1062,7 @@ class HSImportTarget(HSMonoBehaviour):
             t = ftype
             k = field
 
-            # Copied from HSMonoBehavior
+            # Copied from HSMonoBehaviour
             ref = getReference(obj[k])
 
             if ref is None:
@@ -988,17 +1093,19 @@ class HSImportTarget(HSMonoBehaviour):
             'ImportedInteractConversation': HSConversation
         })
 
-    def toTranscript(self):
+    def toTranscriptBody(self):
+
+        if conversation := self.get("ImportedInteractConversation"):
+            yield from conversation.toTranscriptBody()
+
+        if outcome := self.get("Outcome"):
+            yield from outcome.toTranscriptBody()
+
         for message in self.get("ImportedInteractMessage", []):
             # Hero targets don't have field
             # LOCALIZABLE
-            yield f"{message}"
-
-        if conversation := self.get("ImportedInteractConversation"):
-            yield from conversation.toTranscript()
-
-        if outcome := self.get("Outcome"):
-            yield from outcome.toTranscript()
+            yield "<span class='condition always'>Default (imported)</span>"
+            yield from block([f"<p class='message'>{message}</p>"], "conditionalbody")
 
 
 class HSVerb(HSMonoBehaviour):
@@ -1025,7 +1132,7 @@ class HSVerb(HSMonoBehaviour):
             '_outcome': HSOutcome.resolve,
         })
 
-    def toTranscript(self, parent_name=None):
+    def toTranscriptBody(self, parent_name=None):
         lines = []
         verb_clause = f"{self.get('_name')} {parent_name}" if self.get('_name') != parent_name else parent_name
 
@@ -1039,7 +1146,7 @@ class HSVerb(HSMonoBehaviour):
             # *self.get('_interactableTargets')
         ]
         for target in all_targets:
-            transcript = "\n".join(target.toTranscript())
+            transcript = "\n".join(target.toTranscriptBody())
             message_counter[transcript] += 1
 
         try:
@@ -1049,10 +1156,11 @@ class HSVerb(HSMonoBehaviour):
 
         # Iterate through all targets
         for target in self.get('_abilityTargets'):
+            # LOCALIZABLE
             target_name = target.get('Ability').get('_displayName')
-            lines.append(f"## {verb_clause} with {target_name}\n")
+            lines.append(f"<h2 class='verb abilitytarget'>{verb_clause} with {target_name}</h2>\n")
 
-            lines += target.toTranscript()
+            lines += target.toTranscriptBody()
             lines.append("")
 
         for target in self.get('_itemTargets'):
@@ -1063,21 +1171,21 @@ class HSVerb(HSMonoBehaviour):
                 target_name = "[deleted item]"
 
             # If the item is deleted and the transcript is the default, skip it
-            target_transcript = target.toTranscript()
+            target_transcript = target.toTranscriptBody()
             if target_name == "[deleted item]" and "\n".join(target_transcript) == default_message:
                 continue
             else:
-                lines.append(f"## {verb_clause} with {target_name}\n")
+                lines.append(f"<h2 class='verb itemtarget'>{verb_clause} with {target_name}</h2>\n")
                 lines += target_transcript
                 lines.append("")
 
         for target in self.get('_heroTargets'):
             target_name = target.get('Hero').get('m_Name')
-            transcript = target.toTranscript()
+            transcript = target.toTranscriptBody()
             # Only a couple instances of this (joey tap dance), both null
 
             if transcript:
-                lines.append(f"## {verb_clause} with {target_name}\n")
+                lines.append(f"<h2 class='verb herotarget'>{verb_clause} with {target_name}</h2>\n")
 
                 lines += transcript
                 lines.append("")
@@ -1088,31 +1196,31 @@ class HSVerb(HSMonoBehaviour):
                 target_name = target.get('TargetId').get('m_Name')
             except:
                 # Target is null
-                assert not list(target.toTranscript())
+                assert not list(target.toTranscriptBody())
 
-            transcript = target.toTranscript()
+            transcript = target.toTranscriptBody()
             # Only a couple instances of this (joey tap dance), both null
 
             if transcript:
-                lines.append(f"## {verb_clause} with {target_name}\n")
+                lines.append(f"<h2 class='verb interactabletarget'>{verb_clause} with {target_name}</h2>\n")
 
                 lines += transcript
                 lines.append("")
 
         outcome = self.get('_outcome')
         if outcome:
-            sub_transcript = outcome.toTranscript()
+            sub_transcript = outcome.toTranscriptBody()
             if sub_transcript:
-                lines.append(f"## {verb_clause} default outcome\n")
+                lines.append(f"<h2 class='verb notarget'>{verb_clause}</h2>\n")
 
                 lines += sub_transcript
                 lines.append("")
 
         defaultTargetFail = self.get('_defaultTargetFail')
         if defaultTargetFail:
-            sub_transcript = defaultTargetFail.toTranscript()
-            if sub_transcript:
-                lines.append(f"## {verb_clause} default outcome\n")
+            sub_transcript = defaultTargetFail.toTranscriptBody()
+            if list(sub_transcript):
+                lines.append(f"<h2 class='verb notarget fail'>{verb_clause}</h2>\n")
 
                 lines += sub_transcript
                 lines.append("")
@@ -1168,7 +1276,7 @@ class HSOutcome(HSRoot):
         ]
         return super().keys_simple + keys
 
-    def toTranscript(self):
+    def toTranscriptBody(self):
         # Children cannot use this function
         if self.__class__ != HSOutcome:
             raise NotImplementedError(self.__class__)
@@ -1185,10 +1293,10 @@ class HSOutcomeWrapper(HSMonoBehaviour):
             'Sequence': HSOutcomeCanvas
         })
 
-    def toTranscript(self):
+    def toTranscriptBody(self):
         # TODO: Order?
         if seq := self.get("Sequence"):
-            yield from seq.toTranscript()
+            yield from seq.toTranscriptBody()
 
 class HSOutcomeSequence(HSMonoBehaviour):
     # DEBUG = True
@@ -1207,19 +1315,21 @@ class HSOutcomeSequence(HSMonoBehaviour):
             'ActionsList': HSOutcome.resolve
         })
 
-    def toTranscript(self):
+    def toTranscriptBody(self):
         # Actual outcome sequence
-        condition = list(self.get("ActivateCondition").toTranscript())
+        condition = list(self.get("ActivateCondition").toTranscriptBody())
         if condition:
             yield from condition
 
             # TODO: Ordering?
+            block_lines = []
             for outcome in self.get("ActionsList"):
-                yield from block(outcome.toTranscript())
+                block_lines += list(outcome.toTranscriptBody())
+            yield from block(block_lines, "conditionalbody")
 
         else:
             for outcome in self.get("ActionsList"):
-                yield from outcome.toTranscript()
+                yield from outcome.toTranscriptBody()
 
 
 class HSOutcomePolynav(HSMonoBehaviour):
@@ -1266,10 +1376,9 @@ class HSOutcomeTrial(HSMonoBehaviour):
             'Testimony': HSTestimony
         })
 
-    def toTranscript(self):
-        # TODO
-        # LOCALIZABLE
-        yield
+    # def toTranscriptBody(self):
+    #     # TODO
+    #     # LOCALIZABLE
 
 
 class HSOutcomeVFX(HSMonoBehaviour):
@@ -1292,7 +1401,7 @@ class HSOutcomeVFX(HSMonoBehaviour):
         ]
         return super().keys_simple + keys
 
-    def toTranscript(self):
+    def toTranscriptBody(self):
         # Localizable
         yield f"VFX {self.LineVFXTypes[self.get('LineVFXToTrigger')]} ({self.get('VFXName')})"
 
@@ -1311,10 +1420,10 @@ class HSOutcomeNPCGoal(HSMonoBehaviour):
             'NPCStateUpdates': HSNPCState
         })
 
-    def toTranscript(self):
+    def toTranscriptBody(self):
         for update in self.get("NPCStateUpdates"):
             # Localizable
-            yield from update.toTranscript()
+            yield from update.toTranscriptBody()
 
 class HSOutcomeFade(HSMonoBehaviour):
     FadeType = [
@@ -1331,7 +1440,7 @@ class HSOutcomeFade(HSMonoBehaviour):
         ]
         return super().keys_simple + keys
 
-    def toTranscript(self):
+    def toTranscriptBody(self):
         # Localizable
         ftype = self.get("TypeOfFade")
         yield f"Fade {self.FadeType[ftype]} {self.get('FadeDuration')}s"
@@ -1343,8 +1452,8 @@ class HSOutcomeOnStateEnter(HSRoot):
             'Outcome': HSOutcome.resolve
         })
 
-    def toTranscript(self):
-        yield from self.get('Outcome').toTranscript()
+    def toTranscriptBody(self):
+        yield from self.get('Outcome').toTranscriptBody()
 
 class HSOutcomeSwitchCameraTarget(HSMonoBehaviour):
     # there's a bunch of other camera stuff we can ignore
@@ -1358,7 +1467,7 @@ class HSOutcomeSwitchCameraTarget(HSMonoBehaviour):
         ]
         return super().keys_simple + keys
 
-    def toTranscript(self):
+    def toTranscriptBody(self):
         # LOCALIZABLE
         yield f"(Move camera to {self.get('CameraPanTarget')})"
 
@@ -1380,14 +1489,17 @@ class HSOutcomeCanvas(HSRoot):
     def title(self):
         return f"{self.get('_folderName')} OutcomeCanvas#{self.get('_pathId')}"
 
-    def toTranscript(self):
+    def toTranscriptBody(self):
+        global outcomes_seen
+        outcomes_seen.add(self.key)
+
         # LOCALIZABLE
         if self.get('nodes') is None:
             print(self.toDict())
             raise AssertionError
         # TODO: Order?
         for node in self.get('nodes')[::-1]:
-            yield from node.toTranscript()
+            yield from node.toTranscriptBody()
 
 
 class HSOutcomeChangeScene(HSMonoBehaviour):
@@ -1402,7 +1514,7 @@ class HSOutcomeChangeScene(HSMonoBehaviour):
         ]
         return super().keys_simple + keys
 
-    def toTranscript(self):
+    def toTranscriptBody(self):
         verb = "Fade" if self.get('Fade') else "Cut"
         # LOCALIZABLE
         yield f"({verb} to scene '{self.get('GoToScene')}')"
@@ -1427,10 +1539,10 @@ class HSOutcomeChangeHero(HSMonoBehaviour):
         ]
         return super().keys_simple + keys
 
-    def toTranscript(self):
-        # LOCALIZABLE
-        # TODO
-        yield
+    # def toTranscriptBody(self):
+    #     # LOCALIZABLE
+    #     # TODO
+        
 
 class HSOutcomeZoom(HSMonoBehaviour):
     @property
@@ -1448,9 +1560,9 @@ class HSOutcomeZoom(HSMonoBehaviour):
             'ZoomTarget': HSZoomTarget
         })
 
-    def toTranscript(self):
-        # LOCALIABLE
-        yield "TODO ZOOM"
+    def toTranscriptBody(self):
+        return
+        yield
 
 class HSOutcomeMovement(HSMonoBehaviour):
     @property
@@ -1473,9 +1585,9 @@ class HSOutcomeMovement(HSMonoBehaviour):
             'MovementActions': HSMovementAction
         })
 
-    def toTranscript(self):
+    def toTranscriptBody(self):
         for action in self.get("MovementActions"):
-            yield from action.toTranscript()
+            yield from action.toTranscriptBody()
 
 class HSOutcomeSound(HSMonoBehaviour):
     @property
@@ -1498,7 +1610,7 @@ class HSOutcomeSound(HSMonoBehaviour):
             'WorldSoundStop': HSAsset
         })
 
-    def toTranscript(self):
+    def toTranscriptBody(self):
         play_file = self.get("WorldSoundPlay")
         if play_file:
             # LOCALIZABLE
@@ -1514,10 +1626,10 @@ class HSOutcomeMessage(HSMonoBehaviour):
         ]
         return super().keys_simple + keys
 
-    def toTranscript(self):
+    def toTranscriptBody(self):
         for message in self.get("Messages"):
             # LOCALIZABLE
-            yield f"{message}"
+            yield f"<p class='message'>{message}</p>"
 
 class HSOutcomeAnimation(HSMonoBehaviour):
     @property
@@ -1529,7 +1641,7 @@ class HSOutcomeAnimation(HSMonoBehaviour):
         ]
         return super().keys_simple + keys
 
-    def toTranscript(self):
+    def toTranscriptBody(self):
         for param in self.get('AnimParams'):
             obj_name = param.get('_objName')
             param_name = param.get('_paramName')
@@ -1560,19 +1672,19 @@ class HSOutcomeUtility(HSMonoBehaviour):
         ]
         return super().keys_simple + keys
 
-    def toTranscript(self):
+    def toTranscriptBody(self):
 
         if self.get("DoFinalSave"):
             # LOCALIZABLE
-            yield "(Save game FINAL)"
+            yield "<span class='sys'>(Save game FINAL)</span>"
 
         if self.get("ForceAutosave"):
             # LOCALIZABLE
-            yield "(Autosave)"
+            yield "<span class='sys'>(Autosave)</span>"
 
         if ach := self.get("UnlockAchievement"):
             # LOCALIZABLE
-            yield f"(Unlock Achievement: '{ach}')"
+            yield f"<span class='sys'>(Unlock Achievement: <b>{ach}</b>)</span>"
 
         assert not self.get("LineVFXToPlay")
         assert not self.get('TriggerPartyConversation')
@@ -1607,7 +1719,7 @@ class HSOutcomeConversation(HSMonoBehaviour):
             'ConversationToTrigger': HSConversation
         })
 
-    def toTranscript(self):
+    def toTranscriptBody(self):
         assert not self.get("ConditionalConversations")
         
         assert not self.get("ConditionalConversations")
@@ -1617,7 +1729,7 @@ class HSOutcomeConversation(HSMonoBehaviour):
             yield "(End conversation)"
 
         if trigger_convo := self.get("ConversationToTrigger"):
-            yield from trigger_convo.toTranscript()
+            yield from trigger_convo.toTranscriptBody()
 
 class HSOutcomeCounter(HSMonoBehaviour):
     @property
@@ -1626,10 +1738,10 @@ class HSOutcomeCounter(HSMonoBehaviour):
             'counterChanges': HSCounterChange
         })
 
-    def toTranscript(self):
+    def toTranscriptBody(self):
         lines = []
         for change in self.get("counterChanges"):
-            yield from change.toTranscript()
+            yield from change.toTranscriptBody()
         return lines
 
 class HSOutcomeCutscene(HSMonoBehaviour):
@@ -1644,9 +1756,11 @@ class HSOutcomeCutscene(HSMonoBehaviour):
         ]
         return super().keys_simple + keys
 
-    def toTranscript(self):
+    def toTranscriptBody(self):
         # LOCALIZABLE
         yield f"(play cutscene '{self.get('ClipToPlay')}')"
+        yield f"<video class='cutscene' controls src='StreamingAssets/{self.get('ClipToPlay')}'></video>"
+
 
 class HSOutcomeChittr(HSMonoBehaviour):
     @property
@@ -1666,7 +1780,7 @@ class HSOutcomeChittr(HSMonoBehaviour):
             'ChittrConversation': HSConversation
         })
 
-    def toTranscript(self, parent_name=None):
+    def toTranscriptBody(self, parent_name=None):
         if self.get('ShowChittr'):
             # LOCALIZABLE
             yield "(Opens Chittr)"
@@ -1702,36 +1816,36 @@ class HSOutcomeInventory(HSMonoBehaviour):
             'ItemsToRemove': HSItem
         })
 
-    def toTranscript(self):
+    def toTranscriptBody(self):
         for ability in self.get("AbilitiesToRemove"):
             ability_name = ability.get("_displayName")
             # LOCALIZABLE
-            yield f"Skill '{ability_name}' removed"
+            yield f"<span class='sys'>Skill '{ability_name}' removed</span>"
 
         for ability in self.get("AbilitiesToAdd"):
             ability_name = ability.get("_displayName")
             # LOCALIZABLE
-            yield f"Skill '{ability_name}' learned"
+            yield f"<span class='sys'>Skill '{ability_name}' learned</span>"
 
         for device in self.get("DevicesToRemove"):
             device_name = device.get("_displayName")
             # LOCALIZABLE
-            yield f"'{device_name}' removed from inventory"
+            yield f"<span class='sys'>'{device_name}' removed from inventory</span>"
 
         for device in self.get("DevicesToAdd"):
             device_name = device.get("_displayName")
             # LOCALIZABLE
-            yield f"'{device_name}' added to inventory"
+            yield f"<span class='sys'>'{device_name}' added to inventory</span>"
 
         for item in self.get("ItemsToRemove"):
             item_name = item.get("_displayName")
             # LOCALIZABLE
-            yield f"'{item_name}' removed from inventory"
+            yield f"<span class='sys'>'{item_name}' removed from inventory</span>"
 
         for item in self.get("ItemsToAdd"):
             item_name = item.get("_displayName")
             # LOCALIZABLE
-            yield f"'{item_name}' added to inventory"
+            yield f"<span class='sys'>'{item_name}' added to inventory</span>"
 
 
 class HSOutcomeUI(HSMonoBehaviour):
@@ -1753,10 +1867,10 @@ class HSOutcomeUI(HSMonoBehaviour):
             'HeaderMessages': HSHeaderMessage
         })
 
-    def toTranscript(self, parent_name=None):
+    def toTranscriptBody(self, parent_name=None):
         # LOCALIZABLE
         for message in self.get('HeaderMessages'):
-            yield from message.toTranscript()
+            yield from message.toTranscriptBody()
 
         for key, line in [
             ('HideChalkboard', "(Hide Chalkboard)"),
@@ -1772,20 +1886,27 @@ class HSOutcomeUI(HSMonoBehaviour):
 
 # Operations
 
+HTML_META = """
+<link rel="stylesheet" href="transcript.css"></link>
+"""
+
 def dumpItems():
     All_Items = [HSItem(o, recursiveVerbs=True) for o in iterArchiveFiles() if 'ItemID' in o]
+    All_Items.sort(key=lambda o: o.title)
+
 
     with open("Items.json", "w", encoding="utf-8") as fp:
         json.dump([i.toDictRoot() for i in All_Items], fp, indent=4)
 
-    with open("ItemsTranscript.md", "w", encoding="utf-8") as fp:
+    with open("ItemsTranscript.html", "w", encoding="utf-8") as fp:
+        fp.write(HTML_META)
         for item in All_Items:
             try:
-                fp.write(f"# {item.title}\n\n")
-                fp.write("\n".join(item.toTranscript()))
+                fp.write(f"<h1>{item.title}\n\n")
+                fp.write("\n".join(item.toTranscriptBody()))
                 fp.write("\n\n")
             except:
-                pprint.pprint(item.toTranscript())
+                pprint.pprint(item.toTranscriptBody())
                 raise
 
 def dumpEvidence():
@@ -1794,14 +1915,15 @@ def dumpEvidence():
     with open("Evidence.json", "w", encoding="utf-8") as fp:
         json.dump([i.toDictRoot() for i in All_Evidence], fp, indent=4)
 
-    with open("EvidenceTranscript.md", "w", encoding="utf-8") as fp:
+    with open("EvidenceTranscript.html", "w", encoding="utf-8") as fp:
+        fp.write(HTML_META)
         for item in All_Evidence:
             try:
-                fp.write(f"# {item.title}\n\n")
-                fp.write("\n".join(item.toTranscript()))
+                fp.write(f"<h1>{item.title}</h1>\n\n")
+                fp.write("\n".join(item.toTranscriptBody()))
                 fp.write("\n\n")
             except:
-                pprint.pprint(list(item.toTranscript()))
+                pprint.pprint(list(item.toTranscriptBody()))
                 raise
 
 def dumpAbilities():
@@ -1810,41 +1932,71 @@ def dumpAbilities():
     with open("Abilities.json", "w", encoding="utf-8") as fp:
         json.dump([i.toDictRoot() for i in All_Abilities], fp, indent=4)
 
-    with open("AbilitiesTranscript.md", "w", encoding="utf-8") as fp:
+    with open("AbilitiesTranscript.html", "w", encoding="utf-8") as fp:
+        fp.write(HTML_META)
         for ability in All_Abilities:
             try:
-                fp.write(f"# {ability.title}\n\n")
-                fp.write("\n".join(ability.toTranscript()))
+                fp.write(f"<h1>{ability.title}</h1>\n\n")
+                fp.write("\n".join(ability.toTranscriptBody()))
                 fp.write("\n\n")
             except:
-                pprint.pprint(ability.toTranscript())
+                pprint.pprint(ability.toTranscriptBody())
+                raise
+
+def dumpInteractables():
+    All_Interactables = [HSInteractable(o, recursiveVerbs=True) for o in iterArchiveFiles() if o.get("_type") == "Interactable"]
+    All_Interactables.sort(key=lambda o: o.title)
+
+    with open("Interactables.json", "w", encoding="utf-8") as fp:
+        json.dump([i.toDictRoot() for i in All_Interactables], fp, indent=4)
+
+    with open("InteractablesTranscript.html", "w", encoding="utf-8") as fp:
+        fp.write(HTML_META)
+        for interactable in All_Interactables:
+            try:
+                fp.write(f"<h1>{interactable.title}</h1>\n\n")
+                fp.write("\n".join(interactable.toTranscriptBody()))
+                fp.write("\n\n")
+            except:
+                pprint.pprint(interactable.toTranscriptBody())
                 raise
 
 def dumpOutcomes():
     All_Outcomes = [HSOutcomeCanvas(o) for o in iterArchiveFiles() if o.get("_type") == "OutcomeCanvas"]
+    All_Outcomes = [o for o in All_Outcomes if o.key not in outcomes_seen]
     All_Outcomes.sort(key=lambda o: (o.get('_folderName'), o.get('_pathId')))
 
     with open("Outcomes.json", "w", encoding="utf-8") as fp:
         json.dump([i.toDictRoot() for i in All_Outcomes], fp, indent=4)
 
-    with open("OutcomesTranscript.md", "w", encoding="utf-8") as fp:
+    with open("OutcomesTranscript.html", "w", encoding="utf-8") as fp:
+        fp.write(HTML_META)
         for outcome in All_Outcomes:
             try:
-                fp.write(f"# {outcome.title}\n\n")
-                fp.write("\n".join(outcome.toTranscript()))
+                fp.write(f"<h1>{outcome.title}</h1>\n\n")
+                fp.write("\n".join(outcome.toTranscriptBody()))
                 fp.write("\n\n")
             except:
-                pprint.pprint(outcome.toTranscript())
+                pprint.pprint(outcome.toTranscriptBody())
                 raise
 
 async def main():
     await loadArchives()
 
+    global ConversationSpeakers
+    # this is literally how the game does it, sorry
+    ConversationSpeakers = {
+        o.get("SpeakerId"): HSConversationSpeaker(o)
+        for o in iterArchiveFiles()
+        if o.get("_type") == "ConversationSpeaker"
+    }
+
     try:
-        dumpEvidence()
-        dumpOutcomes()
         dumpItems()
         dumpAbilities()
+        dumpEvidence()
+        dumpInteractables()
+        dumpOutcomes()
     finally:
         pprint.pprint(EXAMPLES, compact=True)
 
