@@ -173,8 +173,8 @@ if __name__ == "__main__":
     def show(archive, filename):
         filename = filename.replace('$', '#')
         print(filename)
-        (path_id,) = re.match(r".*\#(\d+)\.json", filename).groups()
-        with open(os.path.join(archive, 'MonoBehaviour', filename)) as f:
+        (path_id,) = re.match(r".* \#(\d+)\.json", filename).groups()
+        with open(os.path.join(archive, 'MonoBehaviour', filename), encoding="utf-8") as f:
             parsed = json.load(f)
 
         fileId = FileID(archive, path_id)
