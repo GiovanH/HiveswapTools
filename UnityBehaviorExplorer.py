@@ -25,13 +25,13 @@ def safe(x):
 
 file_paths = sorted(glob.glob("*/MonoBehaviour/*"))
 
-def findRefs(x, name=None):
+def findRefs(x, name=""):
     if isinstance(x, dict):
         if 'm_FileName' in x:
             id_ = FileID(x['m_FileName'], str(x['m_PathID']))
             yield (id_, name)
         for k, v in x.items():
-            yield from findRefs(v, name=k)
+            yield from findRefs(v, name=name + "." + k)
     elif isinstance(x, list):
         for v in x:
             yield from findRefs(v, name=name)
