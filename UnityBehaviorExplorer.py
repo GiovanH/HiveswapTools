@@ -60,9 +60,10 @@ except (FileNotFoundError, EOFError):
 
         # todo make this faster
         for target, refd_as in findRefs(parsed):
-            referencesFrom[source].append(target)
-            referencedBy[target].append(source)
-            referencedAs[target][source].append(refd_as)
+            if target.fileName is not None:
+                referencesFrom[source].append(target)
+                referencedBy[target].append(source)
+                referencedAs[target][source].append(refd_as)
 
     with open(reference_cache_filepath, "wb") as fp:
         tup = (referencesFrom, referencedBy, referencedAs,)
@@ -101,8 +102,14 @@ def graphFileRefs(root, max_dist=1):
     def fikey(file_id):
         return f"{str(file_id.fileName)}.{file_id.pathId}".replace(' ', '_').replace(')', '').replace('(', '')  
 
-    def _graphFileRefs(root, visited=[], mermaid_defined=[], recursive=True):
+    def _graphFileRefs(root, visited=None, mermaid_defined=None, recursive=1):
+        if visited is None:
+            visited = list()
+        if mermaid_defined is None:
+            mermaid_defined = list()
+
         keys = []
+        print(root, recursive)
 
         if root.fileName is None:
             return
@@ -125,6 +132,11 @@ def graphFileRefs(root, max_dist=1):
             if key in visited:
                 continue
 
+            if refd_as in [".nodeKnobs"]:
+                recursive += 1
+
+            print(key)
+
             visited.append(key)
 
             for node in [source, target]:
@@ -139,7 +151,7 @@ def graphFileRefs(root, max_dist=1):
                     yield f"  {key}{po}{fileIdToName(node).replace(' ','_').replace(')', '').replace('(', '').replace('MonoBehaviour/', '')}{pc}"
                     yield f"  click {key} \"{safe(f'/file/{fileIdToName(node)}')}\""
 
-                    if not recursive:
+                    if not (recursive > 0):
                         yield f"  style {key} fill:#fff0"
 
                     mermaid_defined.append(key)
@@ -148,9 +160,9 @@ def graphFileRefs(root, max_dist=1):
             from_str = f"{fikey(source)}"
             yield f"  {from_str}-->|{refd_as}| {to_str}"
 
-            if recursive:
-                yield from _graphFileRefs(source, visited, mermaid_defined, recursive=False)
-                yield from _graphFileRefs(target, visited, mermaid_defined, recursive=False)
+            if recursive > 0:
+                yield from _graphFileRefs(source, visited, mermaid_defined, recursive=recursive-1)
+                yield from _graphFileRefs(target, visited, mermaid_defined, recursive=recursive-1)
 
     ret = "graph LR\n" + "\n".join(list(_graphFileRefs(root)))
     return ret
