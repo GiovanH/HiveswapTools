@@ -198,7 +198,7 @@ class HSMonoBehaviour():
         return self.dict.get(*args, **kwargs)
     
     def __str__(self):
-        return f"<{self.__class__.__name__} Name:{self.get('m_Name')} Type:{self.get('_type')} @{self.get('_folderName')}#{self.get('_pathId')}>"
+        return f"{self.__class__.__name__} Name:{self.get('m_Name')} Type:{self.get('_type')} @{self.get('_folderName')}#{self.get('_pathId')}"
 
     def __init__(self, obj, recursiveVerbs=False):
         super().__init__()
@@ -672,9 +672,6 @@ class HSCondition(HSMonoBehaviour):
         # LOCALIZABLE
         if lines:
             yield "<span class='condition'>If " + " AND ".join(lines) + "</span>"
-        else:
-            yield f"<!-- {pprint.pformat(self.toDict())} -->"
-            yield "<span class='condition always'>Always</span>"
 
 class HSPresentOutcome(HSMonoBehaviour):
     @property
@@ -904,7 +901,8 @@ class HSCounterChange(HSMonoBehaviour):
         })
 
     def toTranscriptBody(self):
-        # TODO this is probably mix and match
+        # this is probably mix and match
+        # update: it is not
         change_types = {
             0b0000001: "Increment",
             0b0000010: "Decrement",
@@ -914,7 +912,7 @@ class HSCounterChange(HSMonoBehaviour):
             0b0100000: "Equals",
             0b1000000: "Any"
         }
-        # TODO if it's Increment, Decrement, value is always 0? ignored?
+        # if it's Increment, Decrement, value is always 0? ignored?
 
         try:
             counter_name = self.get('counter').get('m_Name')
@@ -926,7 +924,10 @@ class HSCounterChange(HSMonoBehaviour):
         value = self.get('Value')
 
         # LOCALIZABLE
-        yield f"<span class='sys'>{change_types[change_type]} counter '{counter_name}' by {value}</span>"
+        if change_types[change_type] == "Equals":
+            yield f"<span class='sys'>{change_types[change_type]} counter '{counter_name}' to {value}</span>"
+        else:
+            yield f"<span class='sys'>{change_types[change_type]} counter '{counter_name}'</span>"
 
 
 class HSHeaderMessage(HSMonoBehaviour):
@@ -987,8 +988,14 @@ class HSHeaderMessage(HSMonoBehaviour):
             yield f"(play audio '{sfx.toDict()}')"
 
         # LOCALIZABLE
-        for linekey in ['DisplayText', 'DisplayTextLine2', 'DisplayTextLine3']:
-            v = "<span class='headermessage'>" + self.get(linekey) + "</span>"
+        for linekey, color_k in [
+            ('DisplayText', "fontColor"),
+            ('DisplayTextLine2', "fontColor2"),
+            ('DisplayTextLine3', "fontColor")
+        ]:
+            color_d = self.get(color_k)
+            color = f"rgb{color_d['r']*255, color_d['g']*255, color_d['b']*255}"
+            v = f"<span class='headermessage' style='color: {color};'>" + self.get(linekey) + "</span>"
             if v:
                 yield _transform(v)
         
@@ -1035,6 +1042,77 @@ class HSHeroTarget(HSMonoBehaviour):
     def toTranscriptBody(self):
         if outcome := self.get("Outcome"):
             yield from outcome.toTranscriptBody()
+
+class HSSpawnPoint(HSMonoBehaviour):
+    DEBUG = True
+
+    @property
+    def keys_simple(self):
+        keys = [
+            'PreviousScene',
+        ]
+        return super().keys_simple + keys
+
+    @property
+    def keys_typed(self):
+        return self._keys_typed({
+            'Outcome': HSOutcome.resolve
+        })
+
+class HSHeroConversationData(HSMonoBehaviour):
+    DEBUG = True
+
+    def __init__(self, obj):
+        super().__init__(obj, recursiveVerbs=True)
+
+    @property
+    def keys_simple(self):
+        keys = [
+            'm_Name',
+        ]
+        return super().keys_simple + keys
+
+    @property
+    def keys_typed(self):
+        return self._keys_typed({
+            '_verbs': HSVerb
+        })
+
+class HSSceneManager(HSRoot):
+    DEBUG = True
+
+    @property
+    def keys_simple(self):
+        keys = [
+            'debugLastRoom',
+        ]
+        return super().keys_simple + keys
+
+    @property
+    def keys_typed(self):
+        return self._keys_typed({
+            '_arrivalOutcome': HSOutcome.resolve,
+            '_heroSpawnPoints': HSSpawnPoint,
+            # '_localCounterChangeOutcomes': HSCounterChange,  
+            # TODO ugggh it's not QUITE a counterchange AND it has outcomes
+            'HeroConversationData': HSHeroConversationData,
+            'PreArrivalOutcome': HSOutcome.resolve,
+        })
+
+    @property
+    def title(self):
+        return "SceneManager " + self.get("_folderName")
+    
+    def toTranscriptBody(self):
+        outcome = self.get("PreArrivalOutcome")
+        if body := list(outcome.toTranscriptBody()):
+            yield "<h2>Before arrival</h2>"
+            yield from body
+
+        outcome = self.get("_arrivalOutcome")
+        if body := list(outcome.toTranscriptBody()):
+            yield "<h2>On arrival</h2>"
+            yield from body
 
 class HSImportTarget(HSMonoBehaviour):
     # "Import Targets" from things like verbs
@@ -1293,18 +1371,33 @@ class HSOutcomeWrapper(HSMonoBehaviour):
             'Sequence': HSOutcomeCanvas
         })
 
+    @property
+    def title(self):
+        return self.get("Sequence").title
+
     def toTranscriptBody(self):
-        # TODO: Order?
         if seq := self.get("Sequence"):
+            yield f"<!-- {self} -->"
             yield from seq.toTranscriptBody()
 
-class HSOutcomeSequence(HSMonoBehaviour):
+class HSNodeEditorNode(HSRoot):
+    DEBUG = True
+
+    @property
+    def keys_simple(self):
+        keys = [
+            'connections'
+        ]
+        return super().keys_simple + keys
+
+class HSOutcomeSequence(HSRoot):
     # DEBUG = True
 
     @property
     def keys_simple(self):
         keys = [
-            'StartDelay'
+            'StartDelay',
+            'Inputs',
         ]
         return super().keys_simple + keys
 
@@ -1312,20 +1405,31 @@ class HSOutcomeSequence(HSMonoBehaviour):
     def keys_typed(self):
         return self._keys_typed({
             'ActivateCondition': HSCondition,
-            'ActionsList': HSOutcome.resolve
+            'ActionsList': HSOutcome.resolve,
+            'Outputs': HSNodeEditorNode
         })
+
+    def __str__(self):
+        return f"{self.__class__.__name__} @{self.get('_folderName')}#{self.get('_pathId')}"
 
     def toTranscriptBody(self):
         # Actual outcome sequence
+        yield f"<span class='sys'>{self}</span>"
+
         condition = list(self.get("ActivateCondition").toTranscriptBody())
         if condition:
-            yield from condition
 
             # TODO: Ordering?
             block_lines = []
             for outcome in self.get("ActionsList"):
                 block_lines += list(outcome.toTranscriptBody())
-            yield from block(block_lines, "conditionalbody")
+
+            if block_lines:
+                yield from condition
+                yield from block(block_lines, "conditionalbody")
+            else:
+                # TODO: Empty?
+                pass
 
         else:
             for outcome in self.get("ActionsList"):
@@ -1403,7 +1507,7 @@ class HSOutcomeVFX(HSMonoBehaviour):
 
     def toTranscriptBody(self):
         # Localizable
-        yield f"VFX {self.LineVFXTypes[self.get('LineVFXToTrigger')]} ({self.get('VFXName')})"
+        yield f"<span class='sys'>VFX {self.LineVFXTypes[self.get('LineVFXToTrigger')]} ({self.get('VFXName')})</span>"
 
 class HSOutcomeNPCGoal(HSMonoBehaviour):
     @property
@@ -1452,6 +1556,10 @@ class HSOutcomeOnStateEnter(HSRoot):
             'Outcome': HSOutcome.resolve
         })
 
+    @property
+    def title(self):
+        return self.get('Outcome').title
+    
     def toTranscriptBody(self):
         yield from self.get('Outcome').toTranscriptBody()
 
@@ -1493,13 +1601,121 @@ class HSOutcomeCanvas(HSRoot):
         global outcomes_seen
         outcomes_seen.add(self.key)
 
+        yield f"<!-- {self} -->"
         # LOCALIZABLE
         if self.get('nodes') is None:
             print(self.toDict())
             raise AssertionError
-        # TODO: Order?
-        for node in self.get('nodes')[::-1]:
-            yield from node.toTranscriptBody()
+
+        # TODO: Complex input/output system determines order of execution
+
+        # Raw test
+        # yield "<div class='mermaid'>graph TD"
+
+        # for node in self.get('nodes'):
+
+        #     node_key = f"{node.get('_type')}.{node.get('_folderName')}.{node.get('_pathId')}"
+
+        #     yield f"  %% Node {node_key}"
+        #     yield f"  {node_key}([{node_key}])"
+
+        #     for input_node in node.get("Inputs"):
+        #         in_key = f"con_{input_node.get('m_FileName')}.{input_node.get('m_PathID')}"
+
+        #         yield f"  %% - Input {in_key}"
+        #         yield f"  {in_key}-->{node_key}"
+
+        #     if not node.get("Inputs"):
+        #         yield f"  START-->{node_key}"
+
+        #     for output_node in node.get("Outputs"):
+        #         out_key = f"con_{output_node.get('_folderName')}.{output_node.get('_pathId')}"
+
+        #         yield f"  %% - Output {out_key}"
+        #         yield f"  {node_key}-->{out_key}"
+
+        #         for output_connection in output_node.get("connections"):
+        #             con_key = f"con_{output_connection.get('m_FileName')}.{output_connection.get('m_PathID')}"
+
+        #             yield f"  %%   - Connection {con_key}"
+        #             yield f"  {out_key}---{con_key}"
+
+        # yield "</div>"
+
+        # Actual implementation
+        adj_list = collections.defaultdict(list)
+        nodes_by_key = {}
+            # (node.get('_folderName'), node.get('_pathId')): node
+            # for node in self.get('nodes')
+        # }
+
+        for node in self.get('nodes'):
+
+            node_key = f"{node.get('_type')}.{node.get('_folderName')}.{node.get('_pathId')}"
+            nodes_by_key[node_key] = node
+
+            for input_node in node.get("Inputs"):
+                in_key = f"con_{input_node.get('m_FileName')}.{input_node.get('m_PathID')}"
+                adj_list[in_key].append(node_key)
+
+            if not node.get("Inputs"):
+                adj_list['START'].append(node_key)
+
+            for output_node in node.get("Outputs"):
+                out_key = f"con_{output_node.get('_folderName')}.{output_node.get('_pathId')}"
+                adj_list[node_key].append(out_key)
+
+                for output_connection in output_node.get("connections"):
+                    con_key = f"con_{output_connection.get('m_FileName')}.{output_connection.get('m_PathID')}"
+                    adj_list[out_key].append(con_key)
+                    # adj_list[con_key].append(node_key)
+
+        def _pruneCons(rootkey='START'):
+            # TODO: Not sure which is more efficient
+
+            # Bottom-up parsing
+            for dstkey in adj_list[rootkey]:
+                if dstkey.startswith("con_"):
+                    # Connection
+                    print("Pruned", dstkey)
+                    adj_list[rootkey].remove(dstkey)
+                    adj_list[rootkey] += adj_list[dstkey]
+                    _pruneCons(rootkey)  # changed adj_list[rootkey] mid-iteration
+                _pruneCons(dstkey)
+
+            # for conkey in adj_list:
+            #     if conkey.startswith("con_"):
+            #         for srckey in adj_list:
+            #             if conkey in adj_list[srckey]:
+            #                 # srckey connects to con
+            #                 adj_list[srckey] += adj_list[conkey]
+            #                 adj_list[srckey].remove(conkey)
+
+        def _traverseNodeGraph(rootkey='START', visited=None):
+            if visited is None:
+                visited = list()
+            for dstkey in adj_list[rootkey]:
+                pathkey = (rootkey, dstkey)
+                if pathkey in visited:
+                    continue
+                else:
+                    visited.append(pathkey)
+                    yield pathkey
+                    yield from _traverseNodeGraph(dstkey, visited)
+
+        _pruneCons()
+
+        yield "<div class='mermaid'>graph LR"
+        for srckey, dstkey in _traverseNodeGraph():
+            yield f"  {srckey}-->{dstkey}"
+        yield "</div>"
+
+        # Note: This is *a* valid order, not actually the correct one.
+        # No good way to easily express simultaneous events in a transcript
+
+        # Maybe try to put "long" events later? urgh
+        for prevkey, nodekey in _traverseNodeGraph():
+            yield from nodes_by_key[nodekey].toTranscriptBody()
 
 
 class HSOutcomeChangeScene(HSMonoBehaviour):
@@ -1614,7 +1830,7 @@ class HSOutcomeSound(HSMonoBehaviour):
         play_file = self.get("WorldSoundPlay")
         if play_file:
             # LOCALIZABLE
-            yield f"(play audio '{play_file.toDict()}')"
+            yield f"<span class='sys'>(play audio '{play_file.toDict()}')</span>"
 
 class HSOutcomeMessage(HSMonoBehaviour):
     @property
@@ -1648,7 +1864,7 @@ class HSOutcomeAnimation(HSMonoBehaviour):
             anim_type = param.get('_type')
             value = param.get('value')
             # LOCALIZABLE
-            yield f"Animation: {obj_name} {param_name}, {anim_type=} {value=}"
+            yield f"<span class='sys'>Animation: {obj_name} {param_name}, {anim_type=} {value=}</span>"
 
 class HSOutcomeUtility(HSMonoBehaviour):
     @property
@@ -1758,7 +1974,7 @@ class HSOutcomeCutscene(HSMonoBehaviour):
 
     def toTranscriptBody(self):
         # LOCALIZABLE
-        yield f"(play cutscene '{self.get('ClipToPlay')}')"
+        yield f"<span class='sys'>(play cutscene '{self.get('ClipToPlay')}')</span>"
         yield f"<video class='cutscene' controls src='StreamingAssets/{self.get('ClipToPlay')}'></video>"
 
 
@@ -1888,6 +2104,17 @@ class HSOutcomeUI(HSMonoBehaviour):
 
 HTML_META = """
 <link rel="stylesheet" href="transcript.css"></link>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<script>
+    var config = {
+        startOnLoad:true,
+        htmlLabels:true,
+        flowchart:{
+            useMaxWidth:false,
+        }
+    };
+    mermaid.initialize(config);
+</script>
 """
 
 def dumpItems():
@@ -1958,7 +2185,43 @@ def dumpInteractables():
                 fp.write("\n".join(interactable.toTranscriptBody()))
                 fp.write("\n\n")
             except:
-                pprint.pprint(interactable.toTranscriptBody())
+                pprint.pprint(list(interactable.toTranscriptBody()))
+                raise
+
+def dumpScenes():
+    All_Scenes = [HSSceneManager(o, recursiveVerbs=True) for o in iterArchiveFiles() if o.get("_type") == "SceneManager"]
+    All_Scenes.sort(key=lambda o: o.title)
+
+    with open("Scenes.json", "w", encoding="utf-8") as fp:
+        json.dump([i.toDictRoot() for i in All_Scenes], fp, indent=4)
+
+    with open("ScenesTranscript.html", "w", encoding="utf-8") as fp:
+        fp.write(HTML_META)
+        for scenemgr in All_Scenes:
+            try:
+                fp.write(f"<h1>{scenemgr.title}</h1>\n\n")
+                fp.write("\n".join(scenemgr.toTranscriptBody()))
+                fp.write("\n\n")
+            except:
+                pprint.pprint(list(scenemgr.toTranscriptBody()))
+                raise
+
+def dumpAnimOutcomes():
+    All_OnEnter = [HSOutcomeOnStateEnter(o) for o in iterArchiveFiles() if o.get("_type") == "OutcomeOnStateEnter"]
+    All_OnEnter.sort(key=lambda o: (o.get('_folderName'), o.get('_pathId')))
+
+    with open("OutcomesOnEnter.json", "w", encoding="utf-8") as fp:
+        json.dump([i.toDictRoot() for i in All_OnEnter], fp, indent=4)
+
+    with open("OutcomesOnEnterTranscript.html", "w", encoding="utf-8") as fp:
+        fp.write(HTML_META)
+        for outcome in All_OnEnter:
+            try:
+                fp.write(f"<h1>{outcome.title}</h1>\n\n")
+                fp.write("\n".join(outcome.toTranscriptBody()))
+                fp.write("\n\n")
+            except:
+                pprint.pprint(outcome.toTranscriptBody())
                 raise
 
 def dumpOutcomes():
@@ -1992,10 +2255,12 @@ async def main():
     }
 
     try:
+        dumpScenes()
         dumpItems()
         dumpAbilities()
         dumpEvidence()
         dumpInteractables()
+        dumpAnimOutcomes()
         dumpOutcomes()
     finally:
         pprint.pprint(EXAMPLES, compact=True)
