@@ -8,6 +8,10 @@ import pprint
 import re
 import collections
 from urllib.parse import quote_plus, quote
+from functools import lru_cache
+
+# TODO: Group items/abilities by TARGET too, not just ITEM
+# that'll be easier to sort into gameplay order probably
 
 try:    
     from snip.loom import AIOSpool
@@ -174,6 +178,46 @@ HeroNum = [
     "Jude",
     "Xefros"
 ]
+
+SceneNameInBuildSettings = {
+    "level0": "Global Module",
+    "level1": "Splashes",
+    "level2": "Start Menu",
+    "level3": "002 Mountains Exterior",
+    "level4": "002 Mountains Interior",
+    "level5": "003 Plains Interior",
+    "level6": "003 Plains Exterior",
+    "level7": "Static Credits",
+    "level8": "003 No Spray Game Over",
+    "level9": "003 Bee Dance Minigame",
+    "level10": "005 Rust-Bronze Car",
+    "level11": "002 Swim Game Over",
+    "level12": "006 Yellow-Olive Car",
+    "level13": "001 Trainstop Cafe",
+    "level14": "007 Jade-Teal Car",
+    "level15": "008 Cerulean Car",
+    "level16": "008 Indigo Car",
+    "level17": "004 Train Station Ticket Area",
+    "level18": "004 Train Station Boarding ",
+    "level19": "006 Yellow-Olive Gangway",
+    "level20": "005 Rust-Bronze Gangway",
+    "level21": "008 Ardata Game Over",
+    "level22": "008 Indigo Gangway",
+    "level23": "009 Clown Car",
+    "level24": "010 Engine Room Gangway",
+    "level25": "010 Engine Room",
+    "level26": "007 Bronya Trial Game Over",
+    "level27": "007 Tirona Trial Game Over",
+    "level28": "007 Tegiri Trial Game Over",
+    "level29": "007 Trial Minigame",
+    "level30": "007 Lynera Trial Game Over",
+    "level31": "010 Drone Look GameOver",
+    "level32": "010 Track Switch GameOver",
+    "level33": "006 Azdaja Strife",
+    "level34": "007 Lanque Trial Game Over",
+    "level35": "007 Jade-Teal Gangway",
+    "level36": "010 Final Scene",
+}
 
 class HSMonoBehaviour():
     DEBUG = False
@@ -445,6 +489,11 @@ class HSCounter(HSRoot):
         ]
         return super().keys_simple + keys
 
+    @property
+    def isbool(self):
+        return self.get("_minValue") == 0 and self.get("_maxValue") == 1
+    
+
 class HSCounterTest(HSMonoBehaviour):
     @property
     def keys_simple(self):
@@ -610,6 +659,40 @@ class HSTarget(HSMonoBehaviour):
         ]
         return super().keys_simple + keys
 
+
+class HSTriggerVolume(HSRoot):
+    DEBUG = True
+
+    @property
+    def keys_simple(self):
+        keys = [
+        ]
+        return super().keys_simple + keys
+
+    @property
+    def keys_typed(self):
+        return self._keys_typed({
+            'OnEnterSequence': HSOutcomeWrapper,
+            'OnExitSequence': HSOutcomeWrapper,
+        })
+
+    @property
+    def title(self):
+        return SceneNameInBuildSettings[self.get("_folderName")] + " TriggerVolume " + self.get("_pathId")
+
+    def toTranscriptBody(self):
+        if onEnter := self.get("OnEnterSequence"):
+            if body_lines := list(onEnter.toTranscriptBody()):
+                yield "<h2>On Enter</h2>"
+                yield from block(body_lines)
+
+        if onExit := self.get("onExitSequence"):
+            if body_lines := list(onExit.toTranscriptBody()):
+                yield "<h2>On Exit</h2>"
+                yield from block(body_lines)
+
+            
+
 class HSCondition(HSMonoBehaviour):
     # TODO: There are definitely more fields than this
 
@@ -623,7 +706,8 @@ class HSCondition(HSMonoBehaviour):
     @property
     def keys_simple(self):
         keys = [
-            'MustBeHero'
+            'MustBeHero',
+            'LastScene'
         ]
         return super().keys_simple + keys
 
@@ -638,6 +722,10 @@ class HSCondition(HSMonoBehaviour):
 
     def toTranscriptBody(self):
         lines = []
+
+        if last_scene := self.get('LastScene'):
+            # LOCALIZABLE
+            lines.append("came from scene " + last_scene)
 
         if (required_hero := self.get('MustBeHero')) != -1:
             # LOCALIZABLE
@@ -665,9 +753,14 @@ class HSCondition(HSMonoBehaviour):
                 # Counter can be null
                 counter_name = "None"
 
-            comparison_str = f"{self.ComparisonOp[comparison]}"
+            comparison_str = f"{self.ComparisonOp[comparison]} {value}"
+            if test.get('_counter') and test.get('_counter').isbool:
+                if comparison_str == "Equals 0":
+                    comparison_str = "is False"
+                if comparison_str == "Equals 1":
+                    comparison_str = "is True"
             # LOCALIZABLE
-            lines.append(f"counter '{counter_name}' {comparison_str} {value}")
+            lines.append(f"'{counter_name}' {comparison_str}")
 
         # LOCALIZABLE
         if lines:
@@ -916,6 +1009,13 @@ class HSCounterChange(HSMonoBehaviour):
 
         try:
             counter_name = self.get('counter').get('m_Name')
+
+            if self.get('counter').isbool:
+                change_types.update({
+                    0b0000001: "Set",
+                    0b0000010: "Unset",
+                })
+
         except AttributeError:
             # Counter can be null
             counter_name = "None"
@@ -1000,8 +1100,6 @@ class HSHeaderMessage(HSMonoBehaviour):
                 yield _transform(v)
         
 class HSInteractable(HSMonoBehaviour):
-    DEBUG = True
-
     @property
     def keys_simple(self):
         keys = [
@@ -1029,8 +1127,6 @@ class HSInteractable(HSMonoBehaviour):
             yield from v.toTranscriptBody(parent_name=self.title)
 
 class HSHeroTarget(HSMonoBehaviour):
-    DEBUG = True
-
     @property
     def keys_typed(self):
         return self._keys_typed({
@@ -1060,8 +1156,6 @@ class HSSpawnPoint(HSMonoBehaviour):
         })
 
 class HSHeroConversationData(HSMonoBehaviour):
-    DEBUG = True
-
     def __init__(self, obj):
         super().__init__(obj, recursiveVerbs=True)
 
@@ -1079,8 +1173,6 @@ class HSHeroConversationData(HSMonoBehaviour):
         })
 
 class HSSceneManager(HSRoot):
-    DEBUG = True
-
     @property
     def keys_simple(self):
         keys = [
@@ -1101,7 +1193,7 @@ class HSSceneManager(HSRoot):
 
     @property
     def title(self):
-        return "SceneManager " + self.get("_folderName")
+        return "SceneManager " + SceneNameInBuildSettings[self.get("_folderName")]
     
     def toTranscriptBody(self):
         outcome = self.get("PreArrivalOutcome")
@@ -1381,12 +1473,13 @@ class HSOutcomeWrapper(HSMonoBehaviour):
             yield from seq.toTranscriptBody()
 
 class HSNodeEditorNode(HSRoot):
-    DEBUG = True
-
     @property
     def keys_simple(self):
         keys = [
-            'connections'
+            'connections',
+            'calculationBlockade',
+            'typeID',
+            'body'
         ]
         return super().keys_simple + keys
 
@@ -1397,7 +1490,7 @@ class HSOutcomeSequence(HSRoot):
     def keys_simple(self):
         keys = [
             'StartDelay',
-            'Inputs',
+            'Inputs'
         ]
         return super().keys_simple + keys
 
@@ -1414,9 +1507,12 @@ class HSOutcomeSequence(HSRoot):
 
     def toTranscriptBody(self):
         # Actual outcome sequence
-        yield f"<span class='sys'>{self}</span>"
+        # yield f"<span class='sys'>{self}</span>"
 
         condition = list(self.get("ActivateCondition").toTranscriptBody())
+        
+        condition = [f"<span class='sys'>{self}</span>"] + condition
+
         if condition:
 
             # TODO: Ordering?
@@ -1677,7 +1773,6 @@ class HSOutcomeCanvas(HSRoot):
             for dstkey in adj_list[rootkey]:
                 if dstkey.startswith("con_"):
                     # Connection
-                    print("Pruned", dstkey)
                     adj_list[rootkey].remove(dstkey)
                     adj_list[rootkey] += adj_list[dstkey]
                     _pruneCons(rootkey)  # changed adj_list[rootkey] mid-iteration
@@ -1714,9 +1809,13 @@ class HSOutcomeCanvas(HSRoot):
         # No good way to easily express simultaneous events in a transcript
 
         # Maybe try to put "long" events later? urgh
-        for prevkey, nodekey in _traverseNodeGraph():
-            yield from nodes_by_key[nodekey].toTranscriptBody()
 
+        for starter_key in adj_list['START']:
+            yield "<div class='nodebody'>"
+            yield from nodes_by_key[starter_key].toTranscriptBody()
+            for prevkey, nodekey in _traverseNodeGraph(rootkey=starter_key):
+                yield from nodes_by_key[nodekey].toTranscriptBody()
+            yield "</div>"
 
 class HSOutcomeChangeScene(HSMonoBehaviour):
     @property
@@ -2006,6 +2105,7 @@ class HSOutcomeChittr(HSMonoBehaviour):
             profile = self.get('SetActiveProfile')
             # LOCALIZABLE
             yield f"(Switches to Chittr profile {profile})"
+            # TODO: Insert chittr conversation here?
 
         if self.get('HideChittr'):
             # LOCALIZABLE
@@ -2117,10 +2217,86 @@ HTML_META = """
 </script>
 """
 
+# Calculate reference graph
+
+def ddictlist():
+    # module level function, picklable
+    return collections.defaultdict(list)
+
+def findRefs(x, name=""):
+    if isinstance(x, dict):
+        if 'm_FileName' in x:
+            id_ = FileID(x['m_FileName'], str(x['m_PathID']))
+            yield (id_, name)
+        for k, v in x.items():
+            yield from findRefs(v, name=name + "." + k)
+    elif isinstance(x, list):
+        for v in x:
+            yield from findRefs(v, name=name)
+
+
+FileID = collections.namedtuple("FileID", ["fileName", "pathId"])
+file_paths = sorted(glob.glob(game_root + "/*/MonoBehaviour/*"))
+
+referencesFrom = collections.defaultdict(list)
+referencedBy = collections.defaultdict(list)
+referencedAs = collections.defaultdict(ddictlist)
+
+reference_cache_filepath = "scriptrefs.pickle"
+try:
+    with open(reference_cache_filepath, "rb") as fp:
+        (referencesFrom, referencedBy, referencedAs) = pickle.load(fp)
+    print("Loaded cached references")
+except (FileNotFoundError, EOFError):
+    print("Building references...")
+    for path in tqdm(file_paths):
+        (folder_name, path_id) = re.match(r".+?([^\/]*)\/[^\/]+\/[^\/]+\#(\d+)\.json", path.replace("\\", "/")).groups()
+        source = FileID(folder_name, path_id)
+        with open(os.path.join(path), 'r', encoding="utf-8") as fp:
+            parsed = json.load(fp)
+
+        # todo make this faster
+        for target, refd_as in findRefs(parsed):
+            if target.fileName is not None:
+                referencesFrom[source].append(target)
+                referencedBy[target].append(source)
+                referencedAs[target][source].append(refd_as)
+
+    with open(reference_cache_filepath, "wb") as fp:
+        tup = (referencesFrom, referencedBy, referencedAs,)
+        pickle.dump(tup, fp)
+
+
+def getReferencesHtml(file_id):
+    if file_id not in referencedBy:
+        print(repr(file_id))
+        return '<p>No references to this file</p>'
+
+    return "<p>Referenced by:</p><ul>\n" + "\n".join(["<li>" + fileIdToName(ref) + " as " + ", ".join(referencedAs[file_id][ref]) + "</li>" for ref in set(referencedBy[file_id])]) + "</ul>"
+
+@lru_cache(10000)
+def fileIdToName(ref):
+    target_glob = None
+    try:
+        assert ref.fileName is not None
+        target_glob = os.path.join(game_root, ref.fileName, "*", f"*#{ref.pathId}.*")
+        targetNames = glob.glob(target_glob)
+
+        assert len(targetNames) == 1
+        targetName = targetNames[0].replace('\\', '/')
+        return targetName
+    except (AssertionError, IndexError):
+        print(target_glob)
+        print(ref)
+        return f"Unknown! ({ref.fileName}/{ref.pathId})"
+
+# Operations
+
 def dumpItems():
+    print("Dumping items")
+
     All_Items = [HSItem(o, recursiveVerbs=True) for o in iterArchiveFiles() if 'ItemID' in o]
     All_Items.sort(key=lambda o: o.title)
-
 
     with open("Items.json", "w", encoding="utf-8") as fp:
         json.dump([i.toDictRoot() for i in All_Items], fp, indent=4)
@@ -2132,11 +2308,13 @@ def dumpItems():
                 fp.write(f"<h1>{item.title}\n\n")
                 fp.write("\n".join(item.toTranscriptBody()))
                 fp.write("\n\n")
-            except:
+            except Exception:
                 pprint.pprint(item.toTranscriptBody())
                 raise
 
 def dumpEvidence():
+    print("Dumping evidence")
+
     All_Evidence = [HSEvidence(o, recursiveVerbs=True) for o in iterArchiveFiles() if 'PresentOutcomes' in o]
 
     with open("Evidence.json", "w", encoding="utf-8") as fp:
@@ -2149,11 +2327,13 @@ def dumpEvidence():
                 fp.write(f"<h1>{item.title}</h1>\n\n")
                 fp.write("\n".join(item.toTranscriptBody()))
                 fp.write("\n\n")
-            except:
+            except Exception:
                 pprint.pprint(list(item.toTranscriptBody()))
                 raise
 
 def dumpAbilities():
+    print("Dumping abilities")
+
     All_Abilities = [HSAbility(o, recursiveVerbs=True) for o in iterArchiveFiles() if 'AbilityID' in o]
 
     with open("Abilities.json", "w", encoding="utf-8") as fp:
@@ -2166,11 +2346,13 @@ def dumpAbilities():
                 fp.write(f"<h1>{ability.title}</h1>\n\n")
                 fp.write("\n".join(ability.toTranscriptBody()))
                 fp.write("\n\n")
-            except:
+            except Exception:
                 pprint.pprint(ability.toTranscriptBody())
                 raise
 
 def dumpInteractables():
+    print("Dumping interactables")
+
     All_Interactables = [HSInteractable(o, recursiveVerbs=True) for o in iterArchiveFiles() if o.get("_type") == "Interactable"]
     All_Interactables.sort(key=lambda o: o.title)
 
@@ -2184,11 +2366,13 @@ def dumpInteractables():
                 fp.write(f"<h1>{interactable.title}</h1>\n\n")
                 fp.write("\n".join(interactable.toTranscriptBody()))
                 fp.write("\n\n")
-            except:
+            except Exception:
                 pprint.pprint(list(interactable.toTranscriptBody()))
                 raise
 
 def dumpScenes():
+    print("Dumping scenes")
+
     All_Scenes = [HSSceneManager(o, recursiveVerbs=True) for o in iterArchiveFiles() if o.get("_type") == "SceneManager"]
     All_Scenes.sort(key=lambda o: o.title)
 
@@ -2202,11 +2386,13 @@ def dumpScenes():
                 fp.write(f"<h1>{scenemgr.title}</h1>\n\n")
                 fp.write("\n".join(scenemgr.toTranscriptBody()))
                 fp.write("\n\n")
-            except:
+            except Exception:
                 pprint.pprint(list(scenemgr.toTranscriptBody()))
                 raise
 
 def dumpAnimOutcomes():
+    print("Dumping animation outcomes")
+
     All_OnEnter = [HSOutcomeOnStateEnter(o) for o in iterArchiveFiles() if o.get("_type") == "OutcomeOnStateEnter"]
     All_OnEnter.sort(key=lambda o: (o.get('_folderName'), o.get('_pathId')))
 
@@ -2220,11 +2406,33 @@ def dumpAnimOutcomes():
                 fp.write(f"<h1>{outcome.title}</h1>\n\n")
                 fp.write("\n".join(outcome.toTranscriptBody()))
                 fp.write("\n\n")
-            except:
-                pprint.pprint(outcome.toTranscriptBody())
+            except Exception:
+                pprint.pprint(list(outcome.toTranscriptBody()))
+                raise
+
+def dumpTriggerVolumes():
+    print("Dumping trigger volumes")
+
+    All_TriggerVolumes = [HSTriggerVolume(o) for o in iterArchiveFiles() if o.get("_type") == "TriggerVolume"]
+    All_TriggerVolumes.sort(key=lambda o: (o.get('_folderName'), o.get('_pathId')))
+
+    with open("TriggerVolumes.json", "w", encoding="utf-8") as fp:
+        json.dump([i.toDictRoot() for i in All_TriggerVolumes], fp, indent=4)
+
+    with open("TriggerVolumes.html", "w", encoding="utf-8") as fp:
+        fp.write(HTML_META)
+        for trigger in All_TriggerVolumes:
+            try:
+                fp.write(f"<h1>{trigger.title}</h1>\n\n")
+                fp.write("\n".join(trigger.toTranscriptBody()))
+                fp.write("\n\n")
+            except Exception:
+                pprint.pprint(list(trigger.toTranscriptBody()))
                 raise
 
 def dumpOutcomes():
+    print("Dumping other outcomes")
+
     All_Outcomes = [HSOutcomeCanvas(o) for o in iterArchiveFiles() if o.get("_type") == "OutcomeCanvas"]
     All_Outcomes = [o for o in All_Outcomes if o.key not in outcomes_seen]
     All_Outcomes.sort(key=lambda o: (o.get('_folderName'), o.get('_pathId')))
@@ -2236,11 +2444,13 @@ def dumpOutcomes():
         fp.write(HTML_META)
         for outcome in All_Outcomes:
             try:
+                file_id = FileID(outcome.get('_folderName'), outcome.get('_pathId'))
                 fp.write(f"<h1>{outcome.title}</h1>\n\n")
+                fp.write(getReferencesHtml(file_id) + "\n")
                 fp.write("\n".join(outcome.toTranscriptBody()))
                 fp.write("\n\n")
-            except:
-                pprint.pprint(outcome.toTranscriptBody())
+            except Exception:
+                pprint.pprint(list(outcome.toTranscriptBody()))
                 raise
 
 async def main():
@@ -2255,11 +2465,13 @@ async def main():
     }
 
     try:
+        dumpTriggerVolumes()
         dumpScenes()
         dumpItems()
         dumpAbilities()
         dumpEvidence()
         dumpInteractables()
+        dumpTriggerVolumes()
         dumpAnimOutcomes()
         dumpOutcomes()
     finally:

@@ -23,7 +23,9 @@ def safe(x):
     return x.replace('#', '$')
 
 
-file_paths = sorted(glob.glob("*/MonoBehaviour/*"))
+game_root = "Act2-AssetStudio/ExportDev2"
+
+file_paths = sorted(glob.glob(game_root + "/*/MonoBehaviour/*"))
 
 def findRefs(x, name=""):
     if isinstance(x, dict):
@@ -73,7 +75,7 @@ def getReferencesHtml(file_id):
     if file_id not in referencedBy:
         return '<p>No references to this file</p>'
 
-    return "<p>Referenced by:</p>" + "\n".join(["<li>" + fileIdToLink(ref) + " as " + ", ".join(referencedAs[file_id][ref]) + "</il>" for ref in set(referencedBy[file_id])])
+    return "<p>Referenced by:</p><ul>" + "\n".join(["<li>" + fileIdToLink(ref) + " as " + ", ".join(referencedAs[file_id][ref]) + "</li>" for ref in set(referencedBy[file_id])]) + "</ul>"
 
 @lru_cache(10000)
 def fileIdToName(ref):
@@ -125,6 +127,8 @@ def graphFileRefs(root, max_dist=1):
                 # Target is referenced by name refd_as by root
                 key = (target, refd_as, root)
                 keys.append(key)
+
+        print(keys)
 
         for key in keys:
             (target, refd_as, source) = key
