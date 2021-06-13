@@ -7,7 +7,10 @@ import collections
 import re
 from functools import lru_cache
 import textwrap
+import logging
 import pickle
+import base64
+import itertools
 
 try:
     from tqdm import tqdm
@@ -23,7 +26,7 @@ def safe(x):
     return x.replace('#', '$')
 
 
-game_root = "Act2-AssetStudio/ExportDev2"
+game_root = "."
 
 file_paths = sorted(glob.glob(game_root + "/*/MonoBehaviour/*"))
 
@@ -81,13 +84,21 @@ def getReferencesHtml(file_id):
 def fileIdToName(ref):
     try:
         assert ref.fileName is not None
-        target_glob = os.path.join(ref.fileName, "*", f"*#{ref.pathId}.*")
+        if ref.fileName == ".":
+            # TEMPORARY HACK
+            archive = "*"
+        else:
+            archive = ref.fileName
+        target_glob = os.path.join(archive, "*", f"*#{ref.pathId}.*")
         targetNames = glob.glob(target_glob)
 
         assert len(targetNames) == 1
         targetName = targetNames[0].replace('\\', '/')
         return targetName
     except (AssertionError, IndexError):
+        logging.warning(ref)
+        logging.warning(target_glob)
+        logging.warning(targetNames)
         return f"Unknown! ({ref.fileName}/{ref.pathId})"
 
 def fileIdToLink(ref):
@@ -96,6 +107,7 @@ def fileIdToLink(ref):
         link = safe(f"/file/{targetName}")
         return f"<a href='{link}'>{targetName}</a>"
     except (AssertionError, IndexError):
+        logging.warning(ref, exc_info=True)
         return f"<em>Unknown!</em> ({ref.fileName}/{ref.pathId})"
 
 
@@ -111,7 +123,7 @@ def graphFileRefs(root, max_dist=1):
             mermaid_defined = list()
 
         keys = []
-        print(root, recursive)
+        # print(root, recursive)
 
         if root.fileName is None:
             return
@@ -128,7 +140,7 @@ def graphFileRefs(root, max_dist=1):
                 key = (target, refd_as, root)
                 keys.append(key)
 
-        print(keys)
+        # print(keys)
 
         for key in keys:
             (target, refd_as, source) = key
@@ -139,7 +151,7 @@ def graphFileRefs(root, max_dist=1):
             if refd_as in [".nodeKnobs"]:
                 recursive += 1
 
-            print(key)
+            # print(key)
 
             visited.append(key)
 
@@ -174,6 +186,8 @@ def graphFileRefs(root, max_dist=1):
 
 # graphFileRefs("sharedassets25.assets", "1607")
 
+b64 = None
+
 if __name__ == "__main__":
     app = Flask(__name__)
 
@@ -185,9 +199,9 @@ if __name__ == "__main__":
         )
         return f'<html><head></head><body>{ret}</body></html>', 200, {'Content-Type': 'text/html; charset=utf-8'}
 
-    @app.route('/file/<archive>/MonoBehaviour/<filename>')
+    @app.route('/file/<archive>/MonoBehaviour/<filename>.json')
     def show(archive, filename):
-        filename = filename.replace('$', '#')
+        filename = filename.replace('$', '#') + ".json"
         print(filename)
         (path_id,) = re.match(r".* \#(\d+)\.json", filename).groups()
         with open(os.path.join(archive, 'MonoBehaviour', filename), encoding="utf-8") as f:
@@ -209,6 +223,20 @@ if __name__ == "__main__":
                         print("Failed ref", targetId)
                 for k, v in x.items():
                     traverse(v)
+
+                global b64
+                if b64 := x.get("serializedPublicVariablesBytesString"):
+                    # Udon encoded block
+                    x["serializedPublicVariablesBytesString_be"] = base64.b64decode(b64).decode("utf-16be", errors="replace")
+                    x["serializedPublicVariablesBytesString_le"] = base64.b64decode(b64).decode("utf-16le", errors="replace")
+
+                if b64 := x.get("serializedProgramBytesString"):
+                    # Udon encoded block
+                    x["serializedProgramBytesString_be"] = base64.b64decode(b64).decode("utf-16be", errors="replace")
+                    x["serializedProgramBytesString_le"] = base64.b64decode(b64).decode("utf-16le", errors="replace")
+
+
+
             elif isinstance(x, list):
                 for v in x:
                     traverse(v)
@@ -217,9 +245,17 @@ if __name__ == "__main__":
         print("traversed")
         ret = f'''<h1>{fileIdToLink(fileId)}</h1>
         {references}
-        <pre>{json.dumps(parsed, indent=4, sort_keys=False)}</pre>''' + '<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script><script>mermaid.initialize({startOnLoad:true});</script>' + f'''        
+        <pre style="overflow-wrap: anywhere;white-space: pre-wrap;">{json.dumps(parsed, indent=4, sort_keys=False)}</pre>''' + '<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script><script>mermaid.initialize({startOnLoad:true});</script>' + f'''        
         <div class='mermaid' style="overflow: auto;">{graphFileRefs(fileId)}</div>'''
         print("done")
         return f'<html><head></head><body>{ret}</body></html>'
+
+    @app.route('/file/<archive>/<type>/<subtype> $<path_id>.dat')
+    def showdat(archive, type, subtype, path_id):
+        with open(os.path.join(archive, type, f"{subtype} #{path_id}.dat"), 'rb') as f:
+            parsed = f.read()
+
+        print(parsed)
+        return f'<html><head></head><body><code style="width: 16em;display: block;overflow-wrap: anywhere;">{parsed.decode("ascii", errors="backslashreplace")}</code></body></html>'
 
     app.run()
